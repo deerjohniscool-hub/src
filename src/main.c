@@ -51,14 +51,18 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
     return true;
 }
 
-void draw_scaled_pixel(uint8_t x, uint8_t y, uint8_t color_idx) {
-    gfx_SetColor(color_idx & 0x03);
-    gfx_FillRectangle(OFFSET_X + (x * SCALE_FACTOR), OFFSET_Y + (y * SCALE_FACTOR), SCALE_FACTOR, SCALE_FACTOR);
+// Ultra-fast direct framebuffer pixel drawing (2x scaled)
+static inline void draw_scaled_pixel_fast(uint8_t x, uint8_t y, uint8_t color_idx) {
+    uint8_t *ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X + (x << 1)];
+    ptr[0] = color_idx;
+    ptr[1] = color_idx;
+    ptr[320] = color_idx;
+    ptr[321] = color_idx;
 }
 
 void show_error(const char *msg1, const char *msg2) {
-    gfx_FillScreen(3);
-    gfx_SetTextFGColor(0);
+    gfx_FillScreen(0);
+    gfx_SetTextFGColor(15);
     gfx_PrintStringXY(msg1, 30, 100);
     if (msg2) gfx_PrintStringXY(msg2, 30, 120);
     gfx_PrintStringXY("Press CLEAR to return", 30, 160);
@@ -76,37 +80,38 @@ void play_video(uint8_t video_slot) {
     }
 
     char magic[6];
-    if (!chunk_read(magic, 6, &reader)) {
-        show_error("Error: Failed to read magic header", NULL);
-        goto cleanup;
-    }
-
-    if (memcmp(magic, "CEVID1", 6) != 0) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "Got: %.6s (Expected CEVID1)", magic);
-        show_error("Error: Header Mismatch!", buf);
+    if (!chunk_read(magic, 6, &reader) || memcmp(magic, "CEVID1", 6) != 0) {
+        show_error("Error: Invalid Video File Header", NULL);
         goto cleanup;
     }
 
     uint16_t width, height;
-    uint8_t target_fps;
+    uint8_t target_fps, num_colors;
     uint32_t total_frames;
 
     if (!chunk_read(&width, sizeof(uint16_t), &reader) ||
         !chunk_read(&height, sizeof(uint16_t), &reader) ||
         !chunk_read(&target_fps, sizeof(uint8_t), &reader) ||
-        !chunk_read(&total_frames, sizeof(uint32_t), &reader)) {
-        show_error("Error: Failed reading header sizes", NULL);
+        !chunk_read(&num_colors, sizeof(uint8_t), &reader)) {
+        show_error("Error: Header read failed", NULL);
         goto cleanup;
     }
 
-    if (total_frames == 0) {
-        show_error("Error: Total frame count is 0", NULL);
+    uint16_t palette[16];
+    if (num_colors > 16) num_colors = 16;
+    if (!chunk_read(palette, num_colors * sizeof(uint16_t), &reader)) {
+        show_error("Error: Failed to read palette", NULL);
         goto cleanup;
     }
+
+    if (!chunk_read(&total_frames, sizeof(uint32_t), &reader) || total_frames == 0) {
+        show_error("Error: No frames found", NULL);
+        goto cleanup;
+    }
+
+    gfx_SetPalette(palette, num_colors * sizeof(uint16_t), 0);
 
     if (target_fps == 0) target_fps = 12;
-
     uint32_t ticks_per_frame = 32768 / target_fps;
     timer_Enable(1, TIMER_32K, TIMER_0INT, TIMER_UP);
 
@@ -134,7 +139,7 @@ void play_video(uint8_t video_slot) {
                 for (uint8_t i = 0; i < count; i++) {
                     uint8_t x = pixels_drawn % width;
                     uint8_t y = pixels_drawn / width;
-                    draw_scaled_pixel(x, y, color);
+                    draw_scaled_pixel_fast(x, y, color);
                     pixels_drawn++;
                 }
             }
@@ -147,7 +152,7 @@ void play_video(uint8_t video_slot) {
                 if (!chunk_read(&x, 1, &reader)) break;
                 if (!chunk_read(&y, 1, &reader)) break;
                 if (!chunk_read(&color, 1, &reader)) break;
-                draw_scaled_pixel(x, y, color);
+                draw_scaled_pixel_fast(x, y, color);
             }
         }
 
@@ -176,14 +181,6 @@ int main(void) {
     gfx_Begin();
     gfx_SetDrawBuffer();
 
-    uint16_t grayscale_palette[4] = {
-        gfx_RGBTo1555(0, 0, 0),        // 0: Black
-        gfx_RGBTo1555(85, 85, 85),    // 1: Dark Gray
-        gfx_RGBTo1555(170, 170, 170), // 2: Light Gray
-        gfx_RGBTo1555(255, 255, 255)  // 3: White
-    };
-    gfx_SetPalette(grayscale_palette, sizeof(grayscale_palette), 0);
-
     uint8_t found_count = 0;
     uint8_t slots[MAX_VIDEOS];
 
@@ -206,11 +203,11 @@ int main(void) {
     uint8_t selected_index = 0;
 
     while (1) {
-        gfx_FillScreen(3);
-        gfx_SetTextFGColor(0);
+        gfx_FillScreen(0);
+        gfx_SetTextFGColor(255);
 
-        gfx_PrintStringXY("TI-84 CE Video Player", 80, 20);
-        gfx_PrintStringXY("---------------------", 80, 32);
+        gfx_PrintStringXY("TI-84 CE Color Video Player", 60, 20);
+        gfx_PrintStringXY("---------------------------", 60, 32);
 
         char str[32];
         snprintf(str, sizeof(str), "< Video %u of %u (Slot V%uDAT) >", selected_index + 1, found_count, slots[selected_index]);
