@@ -39,6 +39,8 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
         }
 
         size_t read_bytes = ti_Read(out, 1, bytes_left, reader->file);
+        if (read_bytes == 0) return false;
+
         bytes_left -= read_bytes;
         out += read_bytes;
 
@@ -51,9 +53,14 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
     return true;
 }
 
-// Ultra-fast direct framebuffer pixel drawing (2x scaled)
-static inline void draw_scaled_pixel_fast(uint8_t x, uint8_t y, uint8_t color_idx) {
-    uint8_t *ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X + (x << 1)];
+// Memory-safe drawing function with strict screen boundary protection
+static inline void draw_scaled_pixel_safe(uint8_t x, uint8_t y, uint8_t color_idx) {
+    if (x >= 120 || y >= 90) return; // Prevents writing past RAM boundaries
+    
+    uint16_t py = OFFSET_Y + (y << 1);
+    uint16_t px = OFFSET_X + (x << 1);
+    
+    uint8_t *ptr = &gfx_vbuffer[py * 320 + px];
     ptr[0] = color_idx;
     ptr[1] = color_idx;
     ptr[320] = color_idx;
@@ -62,10 +69,10 @@ static inline void draw_scaled_pixel_fast(uint8_t x, uint8_t y, uint8_t color_id
 
 void show_error(const char *msg1, const char *msg2) {
     gfx_FillScreen(0);
-    gfx_SetTextFGColor(15);
-    gfx_PrintStringXY(msg1, 30, 100);
-    if (msg2) gfx_PrintStringXY(msg2, 30, 120);
-    gfx_PrintStringXY("Press CLEAR to return", 30, 160);
+    gfx_SetTextFGColor(255);
+    gfx_PrintStringXY(msg1, 20, 100);
+    if (msg2) gfx_PrintStringXY(msg2, 20, 120);
+    gfx_PrintStringXY("Press CLEAR to return", 20, 160);
     gfx_BlitBuffer();
     while (os_GetCSC() != sk_Clear);
 }
@@ -75,13 +82,13 @@ void play_video(uint8_t video_slot) {
     snprintf(reader.base_name, sizeof(reader.base_name), "V%uDAT", video_slot);
 
     if (!open_next_chunk(&reader)) {
-        show_error("Error: Failed to open chunk 0", NULL);
+        show_error("Error: Could not open chunk 0", "Check video file installation");
         return;
     }
 
     char magic[6];
     if (!chunk_read(magic, 6, &reader) || memcmp(magic, "CEVID1", 6) != 0) {
-        show_error("Error: Invalid Video File Header", NULL);
+        show_error("Error: Header Mismatch", "Re-convert video file");
         goto cleanup;
     }
 
@@ -93,19 +100,23 @@ void play_video(uint8_t video_slot) {
         !chunk_read(&height, sizeof(uint16_t), &reader) ||
         !chunk_read(&target_fps, sizeof(uint8_t), &reader) ||
         !chunk_read(&num_colors, sizeof(uint8_t), &reader)) {
-        show_error("Error: Header read failed", NULL);
+        show_error("Error: Corrupt header data", "Re-convert video file");
+        goto cleanup;
+    }
+
+    if (width > 120 || height > 90 || num_colors > 16) {
+        show_error("Error: Invalid dimensions/palette", "Max supported: 120x90, 16 colors");
         goto cleanup;
     }
 
     uint16_t palette[16];
-    if (num_colors > 16) num_colors = 16;
     if (!chunk_read(palette, num_colors * sizeof(uint16_t), &reader)) {
-        show_error("Error: Failed to read palette", NULL);
+        show_error("Error: Corrupt palette data", "Re-convert video file");
         goto cleanup;
     }
 
     if (!chunk_read(&total_frames, sizeof(uint32_t), &reader) || total_frames == 0) {
-        show_error("Error: No frames found", NULL);
+        show_error("Error: Zero frames found", NULL);
         goto cleanup;
     }
 
@@ -139,7 +150,7 @@ void play_video(uint8_t video_slot) {
                 for (uint8_t i = 0; i < count; i++) {
                     uint8_t x = pixels_drawn % width;
                     uint8_t y = pixels_drawn / width;
-                    draw_scaled_pixel_fast(x, y, color);
+                    draw_scaled_pixel_safe(x, y, color);
                     pixels_drawn++;
                 }
             }
@@ -152,7 +163,7 @@ void play_video(uint8_t video_slot) {
                 if (!chunk_read(&x, 1, &reader)) break;
                 if (!chunk_read(&y, 1, &reader)) break;
                 if (!chunk_read(&color, 1, &reader)) break;
-                draw_scaled_pixel_fast(x, y, color);
+                draw_scaled_pixel_safe(x, y, color);
             }
         }
 
@@ -195,7 +206,7 @@ int main(void) {
     }
 
     if (found_count == 0) {
-        show_error("No Video Files Found!", "Ensure V0DAT0 is transferred");
+        show_error("No Video Files Found!", "Transfer V0DAT0 to calculator");
         gfx_End();
         return 0;
     }
