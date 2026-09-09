@@ -50,9 +50,20 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
 }
 
 void draw_scaled_pixel(uint8_t x, uint8_t y, uint8_t color_idx) {
-    uint8_t pal_color = color_idx * 16;
-    gfx_SetColor(pal_color);
+    gfx_SetColor(color_idx & 0x03);
     gfx_FillRectangle(x * SCALE_FACTOR, y * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR);
+}
+
+bool delay_and_check_exit(uint16_t ms) {
+    uint16_t elapsed = 0;
+    while (elapsed < ms) {
+        if (os_GetCSC() == sk_Clear) {
+            return true; // CLEAR pressed
+        }
+        delay(5);
+        elapsed += 5;
+    }
+    return false;
 }
 
 void play_video(uint8_t video_slot) {
@@ -73,9 +84,6 @@ void play_video(uint8_t video_slot) {
     gfx_FillScreen(0);
 
     for (uint32_t f = 0; f < total_frames; f++) {
-        uint8_t key = os_GetCSC();
-        if (key == sk_Clear) break;
-
         uint8_t frame_type;
         if (!chunk_read(&frame_type, 1, &reader)) break;
 
@@ -113,7 +121,11 @@ void play_video(uint8_t video_slot) {
         }
 
         gfx_BlitBuffer();
-        delay(FRAME_DELAY);
+
+        // Check for CLEAR press during the frame delay
+        if (delay_and_check_exit(FRAME_DELAY)) {
+            break;
+        }
     }
 
 cleanup:
@@ -125,6 +137,14 @@ cleanup:
 int main(void) {
     gfx_Begin();
     gfx_SetDrawBuffer();
+
+    uint16_t grayscale_palette[4] = {
+        gfx_RGBTo1555(0, 0, 0),        // 0: Black
+        gfx_RGBTo1555(85, 85, 85),    // 1: Dark Gray
+        gfx_RGBTo1555(170, 170, 170), // 2: Light Gray
+        gfx_RGBTo1555(255, 255, 255)  // 3: White
+    };
+    gfx_SetPalette(grayscale_palette, sizeof(grayscale_palette), 0);
 
     uint8_t found_count = 0;
     uint8_t slots[MAX_VIDEOS];
@@ -140,7 +160,7 @@ int main(void) {
     }
 
     if (found_count == 0) {
-        gfx_FillScreen(255);
+        gfx_FillScreen(3);
         gfx_SetTextFGColor(0);
         gfx_PrintStringXY("No Video Files Found!", 80, 110);
         gfx_PrintStringXY("Press CLEAR to exit", 85, 130);
@@ -153,7 +173,7 @@ int main(void) {
     uint8_t selected_index = 0;
 
     while (1) {
-        gfx_FillScreen(255);
+        gfx_FillScreen(3);
         gfx_SetTextFGColor(0);
 
         gfx_PrintStringXY("TI-84 CE Video Player", 80, 20);
