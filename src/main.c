@@ -16,26 +16,32 @@
 #define FRAMES_PER_CHUNK 3
 #define MAX_VIDEOS 10
 
-void set_ui_palette(void) {
-    uint16_t ui_palette[2] = {
-        gfx_RGBTo1555(15, 15, 25),   // 0: Dark Background
-        gfx_RGBTo1555(255, 255, 255) // 1: Bright White Text
-    };
-    gfx_SetPalette(ui_palette, sizeof(ui_palette), 0);
-}
+// Static variables allocated outside the eZ80 stack to prevent stack overflow crashes
+static char var_name[16];
+static uint16_t palette[16];
+static uint8_t slots[MAX_VIDEOS];
+static char str_buf[64];
 
-void show_error(const char *msg1, const char *msg2) {
-    set_ui_palette();
+static void show_error(const char *msg1, const char *msg2) {
+    uint16_t ui_palette[2];
+    ui_palette[0] = gfx_RGBTo1555(15, 15, 25);
+    ui_palette[1] = gfx_RGBTo1555(255, 255, 255);
+    gfx_SetPalette(ui_palette, sizeof(ui_palette), 0);
+
     gfx_FillScreen(0);
     gfx_SetTextFGColor(1);
     gfx_PrintStringXY(msg1, 20, 100);
     if (msg2) gfx_PrintStringXY(msg2, 20, 120);
     gfx_PrintStringXY("Press CLEAR to return", 20, 160);
     gfx_BlitBuffer();
-    
+
     while (1) {
         kb_Scan();
         if (kb_Data[6] & kb_Clear) break;
+    }
+    while (1) {
+        kb_Scan();
+        if (!(kb_Data[6] & kb_Clear)) break;
     }
 }
 
@@ -52,22 +58,28 @@ static bool wait_frame_and_check_exit(uint8_t fps) {
     return false;
 }
 
-void play_video(uint8_t video_slot) {
-    ti_CloseAll();
+static void play_video(uint8_t video_slot) {
+    ti_var_t file;
+    uint8_t *ptr;
+    uint16_t width = 0, height = 0;
+    uint8_t target_fps = 0, num_colors = 0;
+    uint32_t total_frames = 0;
+    uint8_t current_chunk = 0;
+    uint8_t frame_in_chunk = 0;
 
-    char var_name[10];
+    ti_CloseAll();
     snprintf(var_name, sizeof(var_name), "V%uDAT0", video_slot);
 
-    ti_var_t file = ti_Open(var_name, "r");
+    file = ti_Open(var_name, "r");
     if (!file) {
-        show_error("Error: Could not open chunk 0", "Archive V0DAT files to Flash!");
+        show_error("Error: AppVar Not Found", "Archive V0DAT files to Flash!");
         return;
     }
 
-    uint8_t *ptr = (uint8_t *)ti_GetDataPtr(file);
+    ptr = (uint8_t *)ti_GetDataPtr(file);
     if (!ptr) {
         ti_CloseAll();
-        show_error("Error: Invalid AppVar pointer", "Re-transfer video files");
+        show_error("Error: Null Pointer", "AppVar data is corrupted");
         return;
     }
 
@@ -78,22 +90,17 @@ void play_video(uint8_t video_slot) {
     }
     ptr += 6;
 
-    uint16_t width = 0, height = 0;
-    uint8_t target_fps = 0, num_colors = 0;
-    uint32_t total_frames = 0;
-
     memcpy(&width, ptr, 2); ptr += 2;
     memcpy(&height, ptr, 2); ptr += 2;
     target_fps = *ptr++;
     num_colors = *ptr++;
 
-    if (width != FRAME_WIDTH || height != FRAME_HEIGHT || num_colors > 16) {
+    if (width != FRAME_WIDTH || height != FRAME_HEIGHT || num_colors > 16 || num_colors == 0) {
         ti_CloseAll();
-        show_error("Error: Invalid dimensions", "Expected 120x90, 16 colors");
+        show_error("Error: Invalid Specs", "Expected 120x90, <=16 colors");
         return;
     }
 
-    uint16_t palette[16];
     memcpy(palette, ptr, num_colors * sizeof(uint16_t));
     ptr += num_colors * sizeof(uint16_t);
 
@@ -102,9 +109,6 @@ void play_video(uint8_t video_slot) {
 
     gfx_SetPalette(palette, num_colors * sizeof(uint16_t), 0);
     gfx_FillScreen(0);
-
-    uint8_t current_chunk = 0;
-    uint8_t frame_in_chunk = 0;
 
     for (uint32_t f = 0; f < total_frames; f++) {
         if (frame_in_chunk >= FRAMES_PER_CHUNK) {
@@ -157,17 +161,17 @@ void play_video(uint8_t video_slot) {
 }
 
 int main(void) {
+    uint8_t found_count = 0;
+    uint8_t selected_index = 0;
+
     ti_CloseAll();
     gfx_Begin();
     gfx_SetDrawBuffer();
 
-    uint8_t found_count = 0;
-    uint8_t slots[MAX_VIDEOS];
-
     for (uint8_t i = 0; i < MAX_VIDEOS; i++) {
-        char name[10];
-        snprintf(name, sizeof(name), "V%uDAT0", i);
-        ti_var_t f = ti_Open(name, "r");
+        ti_var_t f;
+        snprintf(var_name, sizeof(var_name), "V%uDAT0", i);
+        f = ti_Open(var_name, "r");
         if (f) {
             ti_Close(f);
             slots[found_count++] = i;
@@ -177,22 +181,24 @@ int main(void) {
     if (found_count == 0) {
         show_error("No Video Files Found!", "Transfer & Archive V0DAT0");
         gfx_End();
+        ti_CloseAll();
         return 0;
     }
 
-    uint8_t selected_index = 0;
-
     while (1) {
-        set_ui_palette();
+        uint16_t ui_palette[2];
+        ui_palette[0] = gfx_RGBTo1555(15, 15, 25);
+        ui_palette[1] = gfx_RGBTo1555(255, 255, 255);
+        gfx_SetPalette(ui_palette, sizeof(ui_palette), 0);
+
         gfx_FillScreen(0);
         gfx_SetTextFGColor(1);
 
         gfx_PrintStringXY("TI-84 CE Color Video Player", 50, 20);
         gfx_PrintStringXY("---------------------------", 50, 32);
 
-        char str[32];
-        snprintf(str, sizeof(str), "< Video %u of %u (Slot V%uDAT) >", selected_index + 1, found_count, slots[selected_index]);
-        gfx_PrintStringXY(str, 40, 100);
+        snprintf(str_buf, sizeof(str_buf), "< Video %u of %u (Slot V%uDAT) >", selected_index + 1, found_count, slots[selected_index]);
+        gfx_PrintStringXY(str_buf, 40, 100);
 
         gfx_PrintStringXY("Controls:", 40, 150);
         gfx_PrintStringXY("[LEFT / RIGHT] : Switch Video", 40, 170);
@@ -205,14 +211,14 @@ int main(void) {
         if (kb_Data[7] & kb_Left) {
             if (selected_index > 0) selected_index--;
             else selected_index = found_count - 1;
-            while (kb_Data[7] & kb_Left) kb_Scan();
+            while (1) { kb_Scan(); if (!(kb_Data[7] & kb_Left)) break; }
         } else if (kb_Data[7] & kb_Right) {
             if (selected_index < found_count - 1) selected_index++;
             else selected_index = 0;
-            while (kb_Data[7] & kb_Right) kb_Scan();
+            while (1) { kb_Scan(); if (!(kb_Data[7] & kb_Right)) break; }
         } else if (kb_Data[1] & kb_2nd) {
             play_video(slots[selected_index]);
-            while (kb_Data[1] & kb_2nd) kb_Scan();
+            while (1) { kb_Scan(); if (!(kb_Data[1] & kb_2nd)) break; }
         } else if (kb_Data[6] & kb_Clear) {
             break;
         }
