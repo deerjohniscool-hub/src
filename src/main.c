@@ -9,16 +9,20 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define SCALE_FACTOR 2
 #define OFFSET_X 40
 #define OFFSET_Y 30
+#define FRAME_WIDTH 120
+#define FRAME_HEIGHT 90
+#define PACKED_FRAME_SIZE ((FRAME_WIDTH * FRAME_HEIGHT) / 2) // Fixed 5,400 bytes per frame
 #define MAX_VIDEOS 10
 
 typedef struct {
     ti_var_t file;
     uint8_t current_idx;
-    char base_name[7];
+    char base_name[6];
 } ChunkedReader;
+
+static uint8_t frame_buffer[PACKED_FRAME_SIZE];
 
 void set_ui_palette(void) {
     uint16_t ui_palette[2] = {
@@ -47,8 +51,6 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
         }
 
         size_t read_bytes = ti_Read(out, 1, bytes_left, reader->file);
-        if (read_bytes == 0) return false;
-
         bytes_left -= read_bytes;
         out += read_bytes;
 
@@ -59,20 +61,6 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
         }
     }
     return true;
-}
-
-// Draws pixels into active back-buffer (gfx_vbuffer) with boundary protection
-static inline void draw_scaled_pixel_fast(uint8_t x, uint8_t y, uint8_t color_idx) {
-    if (x >= 120 || y >= 90) return;
-    
-    uint16_t py = OFFSET_Y + (y << 1);
-    uint16_t px = OFFSET_X + (x << 1);
-    
-    uint8_t *ptr = &gfx_vbuffer[py * 320 + px];
-    ptr[0] = color_idx;
-    ptr[1] = color_idx;
-    ptr[320] = color_idx;
-    ptr[321] = color_idx;
 }
 
 void show_error(const char *msg1, const char *msg2) {
@@ -96,8 +84,8 @@ void play_video(uint8_t video_slot) {
     }
 
     char magic[6];
-    if (!chunk_read(magic, 6, &reader) || memcmp(magic, "CEVID1", 6) != 0) {
-        show_error("Error: Header Mismatch", "Re-convert video file");
+    if (!chunk_read(magic, 6, &reader) || memcmp(magic, "CEVID2", 6) != 0) {
+        show_error("Error: Header Mismatch", "Re-convert video file with new Converter.py");
         goto cleanup;
     }
 
@@ -113,8 +101,8 @@ void play_video(uint8_t video_slot) {
         goto cleanup;
     }
 
-    if (width > 120 || height > 90 || num_colors > 16) {
-        show_error("Error: Invalid dimensions/palette", "Max supported: 120x90, 16 colors");
+    if (width != FRAME_WIDTH || height != FRAME_HEIGHT || num_colors > 16) {
+        show_error("Error: Invalid dimensions/palette", "Expected 120x90, 16 colors");
         goto cleanup;
     }
 
@@ -141,39 +129,29 @@ void play_video(uint8_t video_slot) {
     for (uint32_t f = 0; f < total_frames; f++) {
         timer_Set(1, 0);
 
-        uint8_t frame_type;
-        if (!chunk_read(&frame_type, 1, &reader)) break;
+        if (!chunk_read(frame_buffer, PACKED_FRAME_SIZE, &reader)) {
+            break;
+        }
 
-        if (frame_type == 0) { 
-            uint32_t rle_len;
-            if (!chunk_read(&rle_len, sizeof(uint32_t), &reader)) break;
+        uint8_t *src = frame_buffer;
+        for (uint8_t y = 0; y < FRAME_HEIGHT; y++) {
+            uint8_t *line_ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X];
+            for (uint8_t x = 0; x < FRAME_WIDTH; x += 2) {
+                uint8_t val = *src++;
+                uint8_t c1 = val >> 4;
+                uint8_t c2 = val & 0x0F;
 
-            uint32_t pixels_drawn = 0;
-            uint32_t bytes_read = 0;
+                line_ptr[0] = c1;
+                line_ptr[1] = c1;
+                line_ptr[320] = c1;
+                line_ptr[321] = c1;
 
-            while (bytes_read < rle_len) {
-                uint8_t count, color;
-                if (!chunk_read(&count, 1, &reader)) break;
-                if (!chunk_read(&color, 1, &reader)) break;
-                bytes_read += 2;
+                line_ptr[2] = c2;
+                line_ptr[3] = c2;
+                line_ptr[322] = c2;
+                line_ptr[323] = c2;
 
-                for (uint8_t i = 0; i < count; i++) {
-                    uint8_t x = pixels_drawn % width;
-                    uint8_t y = pixels_drawn / width;
-                    draw_scaled_pixel_fast(x, y, color);
-                    pixels_drawn++;
-                }
-            }
-        } else if (frame_type == 1) { 
-            uint16_t num_changes;
-            if (!chunk_read(&num_changes, sizeof(uint16_t), &reader)) break;
-
-            for (uint16_t i = 0; i < num_changes; i++) {
-                uint8_t x, y, color;
-                if (!chunk_read(&x, 1, &reader)) break;
-                if (!chunk_read(&y, 1, &reader)) break;
-                if (!chunk_read(&color, 1, &reader)) break;
-                draw_scaled_pixel_fast(x, y, color);
+                line_ptr += 4;
             }
         }
 
