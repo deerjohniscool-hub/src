@@ -13,14 +13,9 @@
 #define OFFSET_Y 30
 #define FRAME_WIDTH 120
 #define FRAME_HEIGHT 90
-#define ROW_PACKED_SIZE (FRAME_WIDTH / 2) // 60 bytes per row
+#define FRAME_PACKED_SIZE ((FRAME_WIDTH * FRAME_HEIGHT) / 2) // 5,400 bytes
+#define FRAMES_PER_CHUNK 6
 #define MAX_VIDEOS 10
-
-typedef struct {
-    ti_var_t file;
-    uint8_t current_idx;
-    char base_name[8];
-} ChunkedReader;
 
 void set_ui_palette(void) {
     uint16_t ui_palette[2] = {
@@ -28,45 +23,6 @@ void set_ui_palette(void) {
         gfx_RGBTo1555(255, 255, 255) // 1: Bright White Text
     };
     gfx_SetPalette(ui_palette, sizeof(ui_palette), 0);
-}
-
-bool open_next_chunk(ChunkedReader *reader) {
-    if (reader->file) {
-        ti_Close(reader->file);
-        reader->file = 0;
-    }
-    char var_name[10];
-    snprintf(var_name, sizeof(var_name), "%s%u", reader->base_name, reader->current_idx);
-    reader->file = ti_Open(var_name, "r");
-    return reader->file != 0;
-}
-
-bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
-    uint8_t *out = (uint8_t *)buffer;
-    size_t bytes_left = bytes_to_read;
-
-    while (bytes_left > 0) {
-        if (!reader->file) {
-            if (!open_next_chunk(reader)) {
-                return false;
-            }
-        }
-
-        size_t read_bytes = ti_Read(out, 1, bytes_left, reader->file);
-        if (read_bytes == 0) {
-            ti_Close(reader->file);
-            reader->file = 0;
-            reader->current_idx++;
-            if (!open_next_chunk(reader)) {
-                return false;
-            }
-            continue;
-        }
-
-        bytes_left -= read_bytes;
-        out += read_bytes;
-    }
-    return true;
 }
 
 void show_error(const char *msg1, const char *msg2) {
@@ -82,47 +38,46 @@ void show_error(const char *msg1, const char *msg2) {
 
 void play_video(uint8_t video_slot) {
     ti_CloseAll();
-    ChunkedReader reader = {0};
-    snprintf(reader.base_name, sizeof(reader.base_name), "V%uDAT", video_slot);
 
-    if (!open_next_chunk(&reader)) {
+    char var_name[10];
+    snprintf(var_name, sizeof(var_name), "V%uDAT0", video_slot);
+
+    ti_var_t file = ti_Open(var_name, "r");
+    if (!file) {
         show_error("Error: Could not open chunk 0", "Check video file installation");
         return;
     }
 
-    char magic[6];
-    if (!chunk_read(magic, 6, &reader) || memcmp(magic, "CEVID2", 6) != 0) {
-        show_error("Error: Header Mismatch", "Re-convert video file");
-        goto cleanup;
+    uint8_t *ptr = (uint8_t *)ti_GetDataPtr(file);
+    if (!ptr) {
+        ti_CloseAll();
+        show_error("Error: Invalid AppVar pointer", "Re-transfer video files");
+        return;
     }
 
-    uint16_t width, height;
-    uint8_t target_fps, num_colors;
-    uint32_t total_frames;
-
-    if (!chunk_read(&width, sizeof(uint16_t), &reader) ||
-        !chunk_read(&height, sizeof(uint16_t), &reader) ||
-        !chunk_read(&target_fps, sizeof(uint8_t), &reader) ||
-        !chunk_read(&num_colors, sizeof(uint8_t), &reader)) {
-        show_error("Error: Corrupt header data", "Re-convert video file");
-        goto cleanup;
+    if (memcmp(ptr, "CEVID2", 6) != 0) {
+        ti_CloseAll();
+        show_error("Error: Header Mismatch", "Re-convert with updated Converter.py");
+        return;
     }
+    ptr += 6;
+
+    uint16_t width = *(uint16_t *)ptr; ptr += 2;
+    uint16_t height = *(uint16_t *)ptr; ptr += 2;
+    uint8_t target_fps = *ptr++;
+    uint8_t num_colors = *ptr++;
 
     if (width != FRAME_WIDTH || height != FRAME_HEIGHT || num_colors > 16) {
-        show_error("Error: Invalid dimensions/palette", "Expected 120x90, 16 colors");
-        goto cleanup;
+        ti_CloseAll();
+        show_error("Error: Invalid dimensions", "Expected 120x90, 16 colors");
+        return;
     }
 
-    uint16_t palette[16];
-    if (!chunk_read(palette, num_colors * sizeof(uint16_t), &reader)) {
-        show_error("Error: Corrupt palette data", "Re-convert video file");
-        goto cleanup;
-    }
+    uint16_t *palette = (uint16_t *)ptr;
+    ptr += num_colors * sizeof(uint16_t);
 
-    if (!chunk_read(&total_frames, sizeof(uint32_t), &reader) || total_frames == 0) {
-        show_error("Error: Zero frames found", NULL);
-        goto cleanup;
-    }
+    uint32_t total_frames = *(uint32_t *)ptr;
+    ptr += 4;
 
     gfx_SetPalette(palette, num_colors * sizeof(uint16_t), 0);
 
@@ -132,23 +87,34 @@ void play_video(uint8_t video_slot) {
     timer_Enable(1, TIMER_32K, TIMER_NOINT, TIMER_UP);
     gfx_FillScreen(0);
 
+    uint8_t current_chunk = 0;
+    uint8_t frame_in_chunk = 0;
+
     for (uint32_t f = 0; f < total_frames; f++) {
         timer_Set(1, 0);
 
-        bool frame_failed = false;
+        if (frame_in_chunk >= FRAMES_PER_CHUNK) {
+            ti_CloseAll();
+            current_chunk++;
+            frame_in_chunk = 0;
+
+            snprintf(var_name, sizeof(var_name), "V%uDAT%u", video_slot, current_chunk);
+            file = ti_Open(var_name, "r");
+            if (!file) break;
+
+            ptr = (uint8_t *)ti_GetDataPtr(file);
+            if (!ptr) break;
+        }
+
+        uint8_t *frame_src = ptr;
+        ptr += FRAME_PACKED_SIZE;
+        frame_in_chunk++;
 
         for (uint8_t y = 0; y < FRAME_HEIGHT; y++) {
-            uint8_t line_buf[ROW_PACKED_SIZE];
-            if (!chunk_read(line_buf, ROW_PACKED_SIZE, &reader)) {
-                frame_failed = true;
-                break;
-            }
-
-            uint8_t *src = line_buf;
             uint8_t *line_ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X];
 
             for (uint8_t x = 0; x < FRAME_WIDTH; x += 2) {
-                uint8_t val = *src++;
+                uint8_t val = *frame_src++;
                 uint8_t c1 = val >> 4;
                 uint8_t c2 = val & 0x0F;
 
@@ -166,8 +132,6 @@ void play_video(uint8_t video_slot) {
             }
         }
 
-        if (frame_failed) break;
-
         gfx_BlitBuffer();
 
         bool exit_requested = false;
@@ -182,8 +146,6 @@ void play_video(uint8_t video_slot) {
     }
 
     timer_Disable(1);
-
-cleanup:
     ti_CloseAll();
 }
 
