@@ -7,9 +7,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 
 #define SCALE_FACTOR 2
-#define FRAME_DELAY 33
+#define OFFSET_X 40
+#define OFFSET_Y 30
 #define MAX_VIDEOS 10
 
 typedef struct {
@@ -51,19 +53,7 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
 
 void draw_scaled_pixel(uint8_t x, uint8_t y, uint8_t color_idx) {
     gfx_SetColor(color_idx & 0x03);
-    gfx_FillRectangle(x * SCALE_FACTOR, y * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR);
-}
-
-bool delay_and_check_exit(uint16_t ms) {
-    uint16_t elapsed = 0;
-    while (elapsed < ms) {
-        if (os_GetCSC() == sk_Clear) {
-            return true; // CLEAR pressed
-        }
-        delay(5);
-        elapsed += 5;
-    }
-    return false;
+    gfx_FillRectangle(OFFSET_X + (x * SCALE_FACTOR), OFFSET_Y + (y * SCALE_FACTOR), SCALE_FACTOR, SCALE_FACTOR);
 }
 
 void play_video(uint8_t video_slot) {
@@ -74,16 +64,30 @@ void play_video(uint8_t video_slot) {
 
     char magic[6];
     if (!chunk_read(magic, 6, &reader)) goto cleanup;
+    if (memcmp(magic, "CEVID1", 6) != 0) goto cleanup;
 
     uint16_t width, height;
+    uint8_t target_fps;
     uint32_t total_frames;
+
     if (!chunk_read(&width, sizeof(uint16_t), &reader)) goto cleanup;
     if (!chunk_read(&height, sizeof(uint16_t), &reader)) goto cleanup;
+    if (!chunk_read(&target_fps, sizeof(uint8_t), &reader)) goto cleanup;
     if (!chunk_read(&total_frames, sizeof(uint32_t), &reader)) goto cleanup;
+
+    if (target_fps == 0) target_fps = 12;
+
+    // Calculate ticks per frame using 32768 Hz hardware clock
+    uint32_t ticks_per_frame = 32768 / target_fps;
+
+    // Enable hardware timer 1
+    timer_Enable(1, TIMER_32K, TIMER_0INT, TIMER_UP);
 
     gfx_FillScreen(0);
 
     for (uint32_t f = 0; f < total_frames; f++) {
+        timer_Set(1, 0); // Reset frame clock timer
+
         uint8_t frame_type;
         if (!chunk_read(&frame_type, 1, &reader)) break;
 
@@ -122,11 +126,19 @@ void play_video(uint8_t video_slot) {
 
         gfx_BlitBuffer();
 
-        // Check for CLEAR press during the frame delay
-        if (delay_and_check_exit(FRAME_DELAY)) {
-            break;
+        // Hardware delay loop synchronized to real time
+        bool exit_requested = false;
+        while (timer_Get(1) < ticks_per_frame) {
+            if (os_GetCSC() == sk_Clear) {
+                exit_requested = true;
+                break;
+            }
         }
+
+        if (exit_requested) break;
     }
+
+    timer_Disable(1);
 
 cleanup:
     if (reader.file) {
@@ -186,7 +198,7 @@ int main(void) {
         gfx_PrintStringXY("Controls:", 40, 150);
         gfx_PrintStringXY("[LEFT / RIGHT] : Switch Video", 40, 170);
         gfx_PrintStringXY("[2nd]          : Play Video", 40, 185);
-        gfx_PrintStringXY("[CLEAR]        : Exit App", 40, 200);
+        gfx_PrintStringXY("[CLEAR]        : Exit App / Stop", 40, 200);
 
         gfx_BlitBuffer();
 
