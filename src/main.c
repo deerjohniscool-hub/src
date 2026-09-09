@@ -11,13 +11,17 @@
 #define OFFSET_Y 30
 #define FRAME_WIDTH 120
 #define FRAME_HEIGHT 90
+#define SCALED_WIDTH 240
+#define SCALED_HEIGHT 180
 #define FRAME_PACKED_SIZE ((FRAME_WIDTH * FRAME_HEIGHT) / 2) // 5,400 bytes
 #define FRAMES_PER_CHUNK 3
 #define MAX_VIDEOS 10
 
+// Static global variables (Allocated in BSS section, 0 Heap overhead)
 static char var_name[9];
 static uint16_t gray_palette[16];
 static uint8_t slots[MAX_VIDEOS];
+static uint8_t video_buffer[SCALED_HEIGHT][SCALED_WIDTH]; // 43,200 bytes static
 
 static void build_var_name(uint8_t slot, uint8_t chunk) {
     var_name[0] = 'V';
@@ -44,9 +48,8 @@ static void init_grayscale_palette(void) {
 }
 
 static void show_error(const char *msg1, const char *msg2) {
-    gfx_SetDrawScreen();
+    gfx_ZeroScreen();
     init_grayscale_palette();
-    gfx_FillScreen(0);
     gfx_SetTextFGColor(15);
     gfx_PrintStringXY(msg1, 20, 100);
     if (msg2) gfx_PrintStringXY(msg2, 20, 120);
@@ -60,7 +63,6 @@ static void show_error(const char *msg1, const char *msg2) {
         kb_Scan();
         if (!(kb_Data[6] & kb_Clear)) break;
     }
-    gfx_SetDrawBuffer();
 }
 
 static inline bool check_exit_key(void) {
@@ -135,38 +137,46 @@ static void play_video(uint8_t video_slot) {
             var_size = ti_GetSize(file);
             ptr = (uint8_t *)ti_GetDataPtr(file);
             if (!ptr || var_size < FRAME_PACKED_SIZE) break;
-            
+
             chunk_end = ptr + var_size;
         }
 
         if (ptr + FRAME_PACKED_SIZE > chunk_end) {
-            break; // Prevents reading past memory boundary
+            break;
         }
 
         uint8_t *frame_src = ptr;
         ptr += FRAME_PACKED_SIZE;
         frame_in_chunk++;
 
-        // Render to backbuffer
+        // 1. Decode packed 4-bit nibbles into static offscreen array
         for (uint8_t y = 0; y < FRAME_HEIGHT; y++) {
-            uint8_t *line_ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X];
+            uint8_t row1 = y << 1;
+            uint8_t row2 = row1 + 1;
 
             for (uint8_t x = 0; x < FRAME_WIDTH; x += 2) {
                 uint8_t val = *frame_src++;
                 uint8_t c1 = val >> 4;
                 uint8_t c2 = val & 0x0F;
 
-                line_ptr[0] = c1; line_ptr[1] = c1;
-                line_ptr[320] = c1; line_ptr[321] = c1;
+                uint8_t col1 = x << 1;
 
-                line_ptr[2] = c2; line_ptr[3] = c2;
-                line_ptr[322] = c2; line_ptr[323] = c2;
+                video_buffer[row1][col1]     = c1;
+                video_buffer[row1][col1 + 1] = c1;
+                video_buffer[row2][col1]     = c1;
+                video_buffer[row2][col1 + 1] = c1;
 
-                line_ptr += 4;
+                video_buffer[row1][col1 + 2] = c2;
+                video_buffer[row1][col1 + 3] = c2;
+                video_buffer[row2][col1 + 2] = c2;
+                video_buffer[row2][col1 + 3] = c2;
             }
         }
 
-        gfx_BlitBuffer();
+        // 2. High-speed line copy to VRAM (eliminates visual tearing)
+        for (uint16_t line = 0; line < SCALED_HEIGHT; line++) {
+            memcpy(&gfx_vbuffer[(OFFSET_Y + line) * 320 + OFFSET_X], video_buffer[line], SCALED_WIDTH);
+        }
 
         if (check_exit_key()) break;
     }
@@ -180,7 +190,7 @@ int main(void) {
 
     ti_CloseAll();
     gfx_Begin();
-    gfx_SetDrawBuffer();
+    gfx_SetDrawScreen(); // Direct VRAM target (0 bytes allocated from heap)
 
     for (uint8_t i = 0; i < MAX_VIDEOS; i++) {
         ti_var_t f;
@@ -212,8 +222,6 @@ int main(void) {
         gfx_PrintStringXY("[LEFT / RIGHT] : Switch Slot", 40, 160);
         gfx_PrintStringXY("[2nd]          : Play Video", 40, 175);
         gfx_PrintStringXY("[CLEAR]        : Exit App", 40, 190);
-
-        gfx_BlitBuffer();
 
         kb_Scan();
         if (kb_Data[7] & kb_Left) {
