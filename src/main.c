@@ -15,12 +15,10 @@
 #define FRAMES_PER_CHUNK 3
 #define MAX_VIDEOS 10
 
-// Static global allocations to prevent eZ80 stack overflow
 static char var_name[9];
 static uint16_t gray_palette[16];
 static uint8_t slots[MAX_VIDEOS];
 
-// Fast, zero-stack string builder replacing heavy snprintf/stdio calls
 static void build_var_name(uint8_t slot, uint8_t chunk) {
     var_name[0] = 'V';
     var_name[1] = '0' + (slot % 10);
@@ -46,6 +44,7 @@ static void init_grayscale_palette(void) {
 }
 
 static void show_error(const char *msg1, const char *msg2) {
+    gfx_SetDrawScreen();
     init_grayscale_palette();
     gfx_FillScreen(0);
     gfx_SetTextFGColor(15);
@@ -61,6 +60,7 @@ static void show_error(const char *msg1, const char *msg2) {
         kb_Scan();
         if (!(kb_Data[6] & kb_Clear)) break;
     }
+    gfx_SetDrawBuffer();
 }
 
 static inline bool check_exit_key(void) {
@@ -71,6 +71,7 @@ static inline bool check_exit_key(void) {
 static void play_video(uint8_t video_slot) {
     ti_var_t file;
     uint8_t *ptr;
+    uint16_t var_size = 0;
     uint16_t width = 0, height = 0;
     uint8_t target_fps = 0, num_colors = 0;
     uint32_t total_frames = 0;
@@ -86,10 +87,11 @@ static void play_video(uint8_t video_slot) {
         return;
     }
 
+    var_size = ti_GetSize(file);
     ptr = (uint8_t *)ti_GetDataPtr(file);
-    if (!ptr) {
+    if (!ptr || var_size < 48) {
         ti_CloseAll();
-        show_error("Error: Null Pointer", "AppVar data is corrupted");
+        show_error("Error: Corrupt Header", "AppVar size is invalid");
         return;
     }
 
@@ -111,14 +113,14 @@ static void play_video(uint8_t video_slot) {
         return;
     }
 
-    // Skip palette header bytes; enforce 16-shade hardware palette
     ptr += num_colors * sizeof(uint16_t);
-
     memcpy(&total_frames, ptr, 4);
     ptr += 4;
 
     init_grayscale_palette();
-    gfx_FillScreen(0);
+    gfx_ZeroScreen();
+
+    uint8_t *chunk_end = ((uint8_t *)ti_GetDataPtr(file)) + var_size;
 
     for (uint32_t f = 0; f < total_frames; f++) {
         if (frame_in_chunk >= FRAMES_PER_CHUNK) {
@@ -130,15 +132,22 @@ static void play_video(uint8_t video_slot) {
             file = ti_Open(var_name, "r");
             if (!file) break;
 
+            var_size = ti_GetSize(file);
             ptr = (uint8_t *)ti_GetDataPtr(file);
-            if (!ptr) break;
+            if (!ptr || var_size < FRAME_PACKED_SIZE) break;
+            
+            chunk_end = ptr + var_size;
+        }
+
+        if (ptr + FRAME_PACKED_SIZE > chunk_end) {
+            break; // Prevents reading past memory boundary
         }
 
         uint8_t *frame_src = ptr;
         ptr += FRAME_PACKED_SIZE;
         frame_in_chunk++;
 
-        // Render directly to LCD VRAM (gfx_vbuffer = 0xD00000)
+        // Render to backbuffer
         for (uint8_t y = 0; y < FRAME_HEIGHT; y++) {
             uint8_t *line_ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X];
 
@@ -157,6 +166,8 @@ static void play_video(uint8_t video_slot) {
             }
         }
 
+        gfx_BlitBuffer();
+
         if (check_exit_key()) break;
     }
 
@@ -169,9 +180,7 @@ int main(void) {
 
     ti_CloseAll();
     gfx_Begin();
-    
-    // Direct VRAM rendering mode (uses 0 bytes of RAM heap)
-    gfx_SetDrawScreen();
+    gfx_SetDrawBuffer();
 
     for (uint8_t i = 0; i < MAX_VIDEOS; i++) {
         ti_var_t f;
@@ -192,7 +201,7 @@ int main(void) {
 
     while (1) {
         init_grayscale_palette();
-        gfx_FillScreen(0);
+        gfx_ZeroScreen();
         gfx_SetTextFGColor(15);
 
         gfx_PrintStringXY("TI-84 CE Grayscale Video Player", 35, 20);
@@ -203,6 +212,8 @@ int main(void) {
         gfx_PrintStringXY("[LEFT / RIGHT] : Switch Slot", 40, 160);
         gfx_PrintStringXY("[2nd]          : Play Video", 40, 175);
         gfx_PrintStringXY("[CLEAR]        : Exit App", 40, 190);
+
+        gfx_BlitBuffer();
 
         kb_Scan();
         if (kb_Data[7] & kb_Left) {
