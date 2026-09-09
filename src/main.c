@@ -44,7 +44,7 @@ void play_video(uint8_t video_slot) {
 
     ti_var_t file = ti_Open(var_name, "r");
     if (!file) {
-        show_error("Error: Could not open chunk 0", "Check video file installation");
+        show_error("Error: Could not open chunk 0", "Archive V0DAT files to Flash!");
         return;
     }
 
@@ -62,10 +62,15 @@ void play_video(uint8_t video_slot) {
     }
     ptr += 6;
 
-    uint16_t width = *(uint16_t *)ptr; ptr += 2;
-    uint16_t height = *(uint16_t *)ptr; ptr += 2;
-    uint8_t target_fps = *ptr++;
-    uint8_t num_colors = *ptr++;
+    uint16_t width, height;
+    uint8_t target_fps, num_colors;
+    uint32_t total_frames;
+
+    // Byte-aligned memcpy prevents eZ80 hardware memory fault crashes
+    memcpy(&width, ptr, 2); ptr += 2;
+    memcpy(&height, ptr, 2); ptr += 2;
+    target_fps = *ptr++;
+    num_colors = *ptr++;
 
     if (width != FRAME_WIDTH || height != FRAME_HEIGHT || num_colors > 16) {
         ti_CloseAll();
@@ -73,10 +78,11 @@ void play_video(uint8_t video_slot) {
         return;
     }
 
-    uint16_t *palette = (uint16_t *)ptr;
+    uint16_t palette[16];
+    memcpy(palette, ptr, num_colors * sizeof(uint16_t));
     ptr += num_colors * sizeof(uint16_t);
 
-    uint32_t total_frames = *(uint32_t *)ptr;
+    memcpy(&total_frames, ptr, 4);
     ptr += 4;
 
     gfx_SetPalette(palette, num_colors * sizeof(uint16_t), 0);
@@ -168,7 +174,7 @@ int main(void) {
     }
 
     if (found_count == 0) {
-        show_error("No Video Files Found!", "Transfer V0DAT0 to calculator");
+        show_error("No Video Files Found!", "Transfer & Archive V0DAT0");
         gfx_End();
         return 0;
     }
