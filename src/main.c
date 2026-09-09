@@ -13,16 +13,14 @@
 #define OFFSET_Y 30
 #define FRAME_WIDTH 120
 #define FRAME_HEIGHT 90
-#define PACKED_FRAME_SIZE ((FRAME_WIDTH * FRAME_HEIGHT) / 2) // Fixed 5,400 bytes per frame
+#define ROW_PACKED_SIZE (FRAME_WIDTH / 2) // 60 bytes per row
 #define MAX_VIDEOS 10
 
 typedef struct {
     ti_var_t file;
     uint8_t current_idx;
-    char base_name[6];
+    char base_name[8];
 } ChunkedReader;
-
-static uint8_t frame_buffer[PACKED_FRAME_SIZE];
 
 void set_ui_palette(void) {
     uint16_t ui_palette[2] = {
@@ -33,7 +31,11 @@ void set_ui_palette(void) {
 }
 
 bool open_next_chunk(ChunkedReader *reader) {
-    char var_name[9];
+    if (reader->file) {
+        ti_Close(reader->file);
+        reader->file = 0;
+    }
+    char var_name[10];
     snprintf(var_name, sizeof(var_name), "%s%u", reader->base_name, reader->current_idx);
     reader->file = ti_Open(var_name, "r");
     return reader->file != 0;
@@ -51,14 +53,18 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
         }
 
         size_t read_bytes = ti_Read(out, 1, bytes_left, reader->file);
-        bytes_left -= read_bytes;
-        out += read_bytes;
-
-        if (bytes_left > 0) {
+        if (read_bytes == 0) {
             ti_Close(reader->file);
             reader->file = 0;
             reader->current_idx++;
+            if (!open_next_chunk(reader)) {
+                return false;
+            }
+            continue;
         }
+
+        bytes_left -= read_bytes;
+        out += read_bytes;
     }
     return true;
 }
@@ -75,6 +81,7 @@ void show_error(const char *msg1, const char *msg2) {
 }
 
 void play_video(uint8_t video_slot) {
+    ti_CloseAll();
     ChunkedReader reader = {0};
     snprintf(reader.base_name, sizeof(reader.base_name), "V%uDAT", video_slot);
 
@@ -85,7 +92,7 @@ void play_video(uint8_t video_slot) {
 
     char magic[6];
     if (!chunk_read(magic, 6, &reader) || memcmp(magic, "CEVID2", 6) != 0) {
-        show_error("Error: Header Mismatch", "Re-convert video file with new Converter.py");
+        show_error("Error: Header Mismatch", "Re-convert video file");
         goto cleanup;
     }
 
@@ -121,21 +128,25 @@ void play_video(uint8_t video_slot) {
 
     if (target_fps == 0) target_fps = 12;
     uint32_t ticks_per_frame = 32768 / target_fps;
-    
-    timer_Enable(1, TIMER_32K, TIMER_NOINT, TIMER_UP);
 
+    timer_Enable(1, TIMER_32K, TIMER_NOINT, TIMER_UP);
     gfx_FillScreen(0);
 
     for (uint32_t f = 0; f < total_frames; f++) {
         timer_Set(1, 0);
 
-        if (!chunk_read(frame_buffer, PACKED_FRAME_SIZE, &reader)) {
-            break;
-        }
+        bool frame_failed = false;
 
-        uint8_t *src = frame_buffer;
         for (uint8_t y = 0; y < FRAME_HEIGHT; y++) {
+            uint8_t line_buf[ROW_PACKED_SIZE];
+            if (!chunk_read(line_buf, ROW_PACKED_SIZE, &reader)) {
+                frame_failed = true;
+                break;
+            }
+
+            uint8_t *src = line_buf;
             uint8_t *line_ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X];
+
             for (uint8_t x = 0; x < FRAME_WIDTH; x += 2) {
                 uint8_t val = *src++;
                 uint8_t c1 = val >> 4;
@@ -155,6 +166,8 @@ void play_video(uint8_t video_slot) {
             }
         }
 
+        if (frame_failed) break;
+
         gfx_BlitBuffer();
 
         bool exit_requested = false;
@@ -171,12 +184,11 @@ void play_video(uint8_t video_slot) {
     timer_Disable(1);
 
 cleanup:
-    if (reader.file) {
-        ti_Close(reader.file);
-    }
+    ti_CloseAll();
 }
 
 int main(void) {
+    ti_CloseAll();
     gfx_Begin();
     gfx_SetDrawBuffer();
 
@@ -184,7 +196,7 @@ int main(void) {
     uint8_t slots[MAX_VIDEOS];
 
     for (uint8_t i = 0; i < MAX_VIDEOS; i++) {
-        char name[9];
+        char name[10];
         snprintf(name, sizeof(name), "V%uDAT0", i);
         ti_var_t f = ti_Open(name, "r");
         if (f) {
@@ -235,5 +247,6 @@ int main(void) {
     }
 
     gfx_End();
+    ti_CloseAll();
     return 0;
 }
