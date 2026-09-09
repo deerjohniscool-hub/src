@@ -1,7 +1,7 @@
 #include <ti/screen.h>
-#include <ti/getcsc.h>
 #include <fileioc.h>
 #include <graphx.h>
+#include <keypadc.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -32,15 +32,19 @@ void show_error(const char *msg1, const char *msg2) {
     if (msg2) gfx_PrintStringXY(msg2, 20, 120);
     gfx_PrintStringXY("Press CLEAR to return", 20, 160);
     gfx_BlitBuffer();
-    while (os_GetCSC() != sk_Clear);
+    
+    while (1) {
+        kb_Scan();
+        if (kb_Data[6] & kb_Clear) break;
+    }
 }
 
-// Software timing loop to avoid OS 5.5+ hardware timer security resets
-static bool wait_frame(uint8_t fps) {
-    uint32_t delay_count = 110000 / (fps ? fps : 12);
+static bool wait_frame_and_check_exit(uint8_t fps) {
+    uint32_t delay_count = 90000 / (fps ? fps : 12);
     for (volatile uint32_t i = 0; i < delay_count; i++) {
-        if ((i & 0x3FF) == 0) {
-            if (os_GetCSC() == sk_Clear) {
+        if ((i & 0x1FF) == 0) {
+            kb_Scan();
+            if (kb_Data[6] & kb_Clear) {
                 return true;
             }
         }
@@ -103,7 +107,6 @@ void play_video(uint8_t video_slot) {
     uint8_t frame_in_chunk = 0;
 
     for (uint32_t f = 0; f < total_frames; f++) {
-
         if (frame_in_chunk >= FRAMES_PER_CHUNK) {
             ti_CloseAll();
             current_chunk++;
@@ -145,7 +148,7 @@ void play_video(uint8_t video_slot) {
 
         gfx_BlitBuffer();
 
-        if (wait_frame(target_fps)) {
+        if (wait_frame_and_check_exit(target_fps)) {
             break;
         }
     }
@@ -198,16 +201,19 @@ int main(void) {
 
         gfx_BlitBuffer();
 
-        uint8_t key = os_GetCSC();
-        if (key == sk_Left) {
+        kb_Scan();
+        if (kb_Data[7] & kb_Left) {
             if (selected_index > 0) selected_index--;
             else selected_index = found_count - 1;
-        } else if (key == sk_Right) {
+            while (kb_Data[7] & kb_Left) kb_Scan();
+        } else if (kb_Data[7] & kb_Right) {
             if (selected_index < found_count - 1) selected_index++;
             else selected_index = 0;
-        } else if (key == sk_2nd) {
+            while (kb_Data[7] & kb_Right) kb_Scan();
+        } else if (kb_Data[1] & kb_2nd) {
             play_video(slots[selected_index]);
-        } else if (key == sk_Clear) {
+            while (kb_Data[1] & kb_2nd) kb_Scan();
+        } else if (kb_Data[6] & kb_Clear) {
             break;
         }
     }
