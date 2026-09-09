@@ -16,20 +16,24 @@
 #define FRAMES_PER_CHUNK 3
 #define MAX_VIDEOS 10
 
-// Static variables allocated outside the eZ80 stack to prevent stack overflow crashes
+// Static variables allocated outside eZ80 stack to prevent RAM resets
 static char var_name[16];
-static uint16_t palette[16];
+static uint16_t gray_palette[16];
 static uint8_t slots[MAX_VIDEOS];
 static char str_buf[64];
 
-static void show_error(const char *msg1, const char *msg2) {
-    uint16_t ui_palette[2];
-    ui_palette[0] = gfx_RGBTo1555(15, 15, 25);
-    ui_palette[1] = gfx_RGBTo1555(255, 255, 255);
-    gfx_SetPalette(ui_palette, sizeof(ui_palette), 0);
+static void init_grayscale_palette(void) {
+    for (uint8_t i = 0; i < 16; i++) {
+        uint8_t v = (uint8_t)((i * 255) / 15);
+        gray_palette[i] = gfx_RGBTo1555(v, v, v);
+    }
+    gfx_SetPalette(gray_palette, 16 * sizeof(uint16_t), 0);
+}
 
+static void show_error(const char *msg1, const char *msg2) {
+    init_grayscale_palette();
     gfx_FillScreen(0);
-    gfx_SetTextFGColor(1);
+    gfx_SetTextFGColor(15);
     gfx_PrintStringXY(msg1, 20, 100);
     if (msg2) gfx_PrintStringXY(msg2, 20, 120);
     gfx_PrintStringXY("Press CLEAR to return", 20, 160);
@@ -45,17 +49,10 @@ static void show_error(const char *msg1, const char *msg2) {
     }
 }
 
-static bool wait_frame_and_check_exit(uint8_t fps) {
-    uint32_t delay_count = 90000 / (fps ? fps : 12);
-    for (volatile uint32_t i = 0; i < delay_count; i++) {
-        if ((i & 0x1FF) == 0) {
-            kb_Scan();
-            if (kb_Data[6] & kb_Clear) {
-                return true;
-            }
-        }
-    }
-    return false;
+// Fast lightweight delay loop for zero frame lag
+static inline bool check_exit_key(void) {
+    kb_Scan();
+    return (kb_Data[6] & kb_Clear) != 0;
 }
 
 static void play_video(uint8_t video_slot) {
@@ -95,19 +92,19 @@ static void play_video(uint8_t video_slot) {
     target_fps = *ptr++;
     num_colors = *ptr++;
 
-    if (width != FRAME_WIDTH || height != FRAME_HEIGHT || num_colors > 16 || num_colors == 0) {
+    if (width != FRAME_WIDTH || height != FRAME_HEIGHT) {
         ti_CloseAll();
-        show_error("Error: Invalid Specs", "Expected 120x90, <=16 colors");
+        show_error("Error: Invalid Specs", "Expected 120x90 resolution");
         return;
     }
 
-    memcpy(palette, ptr, num_colors * sizeof(uint16_t));
+    // Skip palette data in header, enforce optimal 16-shade linear grayscale
     ptr += num_colors * sizeof(uint16_t);
 
     memcpy(&total_frames, ptr, 4);
     ptr += 4;
 
-    gfx_SetPalette(palette, num_colors * sizeof(uint16_t), 0);
+    init_grayscale_palette();
     gfx_FillScreen(0);
 
     for (uint32_t f = 0; f < total_frames; f++) {
@@ -128,6 +125,7 @@ static void play_video(uint8_t video_slot) {
         ptr += FRAME_PACKED_SIZE;
         frame_in_chunk++;
 
+        // Fast 2x scaled block copy to LCD VRAM
         for (uint8_t y = 0; y < FRAME_HEIGHT; y++) {
             uint8_t *line_ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X];
 
@@ -136,15 +134,11 @@ static void play_video(uint8_t video_slot) {
                 uint8_t c1 = val >> 4;
                 uint8_t c2 = val & 0x0F;
 
-                line_ptr[0] = c1;
-                line_ptr[1] = c1;
-                line_ptr[320] = c1;
-                line_ptr[321] = c1;
+                line_ptr[0] = c1; line_ptr[1] = c1;
+                line_ptr[320] = c1; line_ptr[321] = c1;
 
-                line_ptr[2] = c2;
-                line_ptr[3] = c2;
-                line_ptr[322] = c2;
-                line_ptr[323] = c2;
+                line_ptr[2] = c2; line_ptr[3] = c2;
+                line_ptr[322] = c2; line_ptr[323] = c2;
 
                 line_ptr += 4;
             }
@@ -152,9 +146,7 @@ static void play_video(uint8_t video_slot) {
 
         gfx_BlitBuffer();
 
-        if (wait_frame_and_check_exit(target_fps)) {
-            break;
-        }
+        if (check_exit_key()) break;
     }
 
     ti_CloseAll();
@@ -186,16 +178,12 @@ int main(void) {
     }
 
     while (1) {
-        uint16_t ui_palette[2];
-        ui_palette[0] = gfx_RGBTo1555(15, 15, 25);
-        ui_palette[1] = gfx_RGBTo1555(255, 255, 255);
-        gfx_SetPalette(ui_palette, sizeof(ui_palette), 0);
-
+        init_grayscale_palette();
         gfx_FillScreen(0);
-        gfx_SetTextFGColor(1);
+        gfx_SetTextFGColor(15);
 
-        gfx_PrintStringXY("TI-84 CE Color Video Player", 50, 20);
-        gfx_PrintStringXY("---------------------------", 50, 32);
+        gfx_PrintStringXY("TI-84 CE Grayscale Video Player", 35, 20);
+        gfx_PrintStringXY("-------------------------------", 35, 32);
 
         snprintf(str_buf, sizeof(str_buf), "< Video %u of %u (Slot V%uDAT) >", selected_index + 1, found_count, slots[selected_index]);
         gfx_PrintStringXY(str_buf, 40, 100);
