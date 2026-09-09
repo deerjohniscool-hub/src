@@ -2,7 +2,6 @@
 #include <ti/getcsc.h>
 #include <fileioc.h>
 #include <graphx.h>
-#include <sys/timers.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,7 +13,7 @@
 #define FRAME_WIDTH 120
 #define FRAME_HEIGHT 90
 #define FRAME_PACKED_SIZE ((FRAME_WIDTH * FRAME_HEIGHT) / 2) // 5,400 bytes
-#define FRAMES_PER_CHUNK 6
+#define FRAMES_PER_CHUNK 3
 #define MAX_VIDEOS 10
 
 void set_ui_palette(void) {
@@ -34,6 +33,19 @@ void show_error(const char *msg1, const char *msg2) {
     gfx_PrintStringXY("Press CLEAR to return", 20, 160);
     gfx_BlitBuffer();
     while (os_GetCSC() != sk_Clear);
+}
+
+// Software timing loop to avoid OS 5.5+ hardware timer security resets
+static bool wait_frame(uint8_t fps) {
+    uint32_t delay_count = 110000 / (fps ? fps : 12);
+    for (volatile uint32_t i = 0; i < delay_count; i++) {
+        if ((i & 0x3FF) == 0) {
+            if (os_GetCSC() == sk_Clear) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void play_video(uint8_t video_slot) {
@@ -62,11 +74,10 @@ void play_video(uint8_t video_slot) {
     }
     ptr += 6;
 
-    uint16_t width, height;
-    uint8_t target_fps, num_colors;
-    uint32_t total_frames;
+    uint16_t width = 0, height = 0;
+    uint8_t target_fps = 0, num_colors = 0;
+    uint32_t total_frames = 0;
 
-    // Byte-aligned memcpy prevents eZ80 hardware memory fault crashes
     memcpy(&width, ptr, 2); ptr += 2;
     memcpy(&height, ptr, 2); ptr += 2;
     target_fps = *ptr++;
@@ -86,18 +97,12 @@ void play_video(uint8_t video_slot) {
     ptr += 4;
 
     gfx_SetPalette(palette, num_colors * sizeof(uint16_t), 0);
-
-    if (target_fps == 0) target_fps = 12;
-    uint32_t ticks_per_frame = 32768 / target_fps;
-
-    timer_Enable(1, TIMER_32K, TIMER_NOINT, TIMER_UP);
     gfx_FillScreen(0);
 
     uint8_t current_chunk = 0;
     uint8_t frame_in_chunk = 0;
 
     for (uint32_t f = 0; f < total_frames; f++) {
-        timer_Set(1, 0);
 
         if (frame_in_chunk >= FRAMES_PER_CHUNK) {
             ti_CloseAll();
@@ -140,18 +145,11 @@ void play_video(uint8_t video_slot) {
 
         gfx_BlitBuffer();
 
-        bool exit_requested = false;
-        while (timer_Get(1) < ticks_per_frame) {
-            if (os_GetCSC() == sk_Clear) {
-                exit_requested = true;
-                break;
-            }
+        if (wait_frame(target_fps)) {
+            break;
         }
-
-        if (exit_requested) break;
     }
 
-    timer_Disable(1);
     ti_CloseAll();
 }
 
