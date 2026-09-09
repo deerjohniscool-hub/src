@@ -61,15 +61,14 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
     return true;
 }
 
-// Draws pixels into active back-buffer with memory boundary protection
+// Draws pixels into active back-buffer (gfx_vbuffer) with boundary protection
 static inline void draw_scaled_pixel_fast(uint8_t x, uint8_t y, uint8_t color_idx) {
     if (x >= 120 || y >= 90) return;
     
-    uint8_t *buf = gfx_GetDrawBuffer();
     uint16_t py = OFFSET_Y + (y << 1);
     uint16_t px = OFFSET_X + (x << 1);
     
-    uint8_t *ptr = &buf[py * 320 + px];
+    uint8_t *ptr = &gfx_vbuffer[py * 320 + px];
     ptr[0] = color_idx;
     ptr[1] = color_idx;
     ptr[320] = color_idx;
@@ -135,7 +134,6 @@ void play_video(uint8_t video_slot) {
     if (target_fps == 0) target_fps = 12;
     uint32_t ticks_per_frame = 32768 / target_fps;
     
-    // TIMER_NOINT prevents interrupt resets
     timer_Enable(1, TIMER_32K, TIMER_NOINT, TIMER_UP);
 
     gfx_FillScreen(0);
