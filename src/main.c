@@ -2,6 +2,7 @@
 #include <ti/getcsc.h>
 #include <fileioc.h>
 #include <graphx.h>
+#include <sys/timers.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -69,11 +70,11 @@ void play_video(uint8_t video_slot) {
     if (!chunk_read(&height, sizeof(uint16_t), &reader)) goto cleanup;
     if (!chunk_read(&total_frames, sizeof(uint32_t), &reader)) goto cleanup;
 
-    gfx_FillScreen(0); // Clear screen to black
+    gfx_FillScreen(0);
 
     for (uint32_t f = 0; f < total_frames; f++) {
         uint8_t key = os_GetCSC();
-        if (key == sk_Clear) break; // [CLEAR] stops video & returns to menu
+        if (key == sk_Clear) break;
 
         uint8_t frame_type;
         if (!chunk_read(&frame_type, 1, &reader)) break;
@@ -128,7 +129,6 @@ int main(void) {
     uint8_t found_count = 0;
     uint8_t slots[MAX_VIDEOS];
 
-    // Scan for video slots V0DAT0 through V9DAT0
     for (uint8_t i = 0; i < MAX_VIDEOS; i++) {
         char name[9];
         snprintf(name, sizeof(name), "V%uDAT0", i);
@@ -180,7 +180,7 @@ int main(void) {
         } else if (key == sk_2nd) {
             play_video(slots[selected_index]);
         } else if (key == sk_Clear) {
-            break; // Exit program
+            break;
         }
     }
 
