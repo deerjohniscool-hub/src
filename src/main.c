@@ -56,37 +56,64 @@ void draw_scaled_pixel(uint8_t x, uint8_t y, uint8_t color_idx) {
     gfx_FillRectangle(OFFSET_X + (x * SCALE_FACTOR), OFFSET_Y + (y * SCALE_FACTOR), SCALE_FACTOR, SCALE_FACTOR);
 }
 
+void show_error(const char *msg1, const char *msg2) {
+    gfx_FillScreen(3);
+    gfx_SetTextFGColor(0);
+    gfx_PrintStringXY(msg1, 30, 100);
+    if (msg2) gfx_PrintStringXY(msg2, 30, 120);
+    gfx_PrintStringXY("Press CLEAR to return", 30, 160);
+    gfx_BlitBuffer();
+    while (os_GetCSC() != sk_Clear);
+}
+
 void play_video(uint8_t video_slot) {
     ChunkedReader reader = {0};
     snprintf(reader.base_name, sizeof(reader.base_name), "V%uDAT", video_slot);
 
-    if (!open_next_chunk(&reader)) return;
+    if (!open_next_chunk(&reader)) {
+        show_error("Error: Failed to open chunk 0", NULL);
+        return;
+    }
 
     char magic[6];
-    if (!chunk_read(magic, 6, &reader)) goto cleanup;
-    if (memcmp(magic, "CEVID1", 6) != 0) goto cleanup;
+    if (!chunk_read(magic, 6, &reader)) {
+        show_error("Error: Failed to read magic header", NULL);
+        goto cleanup;
+    }
+
+    if (memcmp(magic, "CEVID1", 6) != 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Got: %.6s (Expected CEVID1)", magic);
+        show_error("Error: Header Mismatch!", buf);
+        goto cleanup;
+    }
 
     uint16_t width, height;
     uint8_t target_fps;
     uint32_t total_frames;
 
-    if (!chunk_read(&width, sizeof(uint16_t), &reader)) goto cleanup;
-    if (!chunk_read(&height, sizeof(uint16_t), &reader)) goto cleanup;
-    if (!chunk_read(&target_fps, sizeof(uint8_t), &reader)) goto cleanup;
-    if (!chunk_read(&total_frames, sizeof(uint32_t), &reader)) goto cleanup;
+    if (!chunk_read(&width, sizeof(uint16_t), &reader) ||
+        !chunk_read(&height, sizeof(uint16_t), &reader) ||
+        !chunk_read(&target_fps, sizeof(uint8_t), &reader) ||
+        !chunk_read(&total_frames, sizeof(uint32_t), &reader)) {
+        show_error("Error: Failed reading header sizes", NULL);
+        goto cleanup;
+    }
+
+    if (total_frames == 0) {
+        show_error("Error: Total frame count is 0", NULL);
+        goto cleanup;
+    }
 
     if (target_fps == 0) target_fps = 12;
 
-    // Calculate ticks per frame using 32768 Hz hardware clock
     uint32_t ticks_per_frame = 32768 / target_fps;
-
-    // Enable hardware timer 1
     timer_Enable(1, TIMER_32K, TIMER_0INT, TIMER_UP);
 
     gfx_FillScreen(0);
 
     for (uint32_t f = 0; f < total_frames; f++) {
-        timer_Set(1, 0); // Reset frame clock timer
+        timer_Set(1, 0);
 
         uint8_t frame_type;
         if (!chunk_read(&frame_type, 1, &reader)) break;
@@ -126,7 +153,6 @@ void play_video(uint8_t video_slot) {
 
         gfx_BlitBuffer();
 
-        // Hardware delay loop synchronized to real time
         bool exit_requested = false;
         while (timer_Get(1) < ticks_per_frame) {
             if (os_GetCSC() == sk_Clear) {
@@ -172,12 +198,7 @@ int main(void) {
     }
 
     if (found_count == 0) {
-        gfx_FillScreen(3);
-        gfx_SetTextFGColor(0);
-        gfx_PrintStringXY("No Video Files Found!", 80, 110);
-        gfx_PrintStringXY("Press CLEAR to exit", 85, 130);
-        gfx_BlitBuffer();
-        while (os_GetCSC() != sk_Clear);
+        show_error("No Video Files Found!", "Ensure V0DAT0 is transferred");
         gfx_End();
         return 0;
     }
