@@ -20,6 +20,14 @@ typedef struct {
     char base_name[7];
 } ChunkedReader;
 
+void set_ui_palette(void) {
+    uint16_t ui_palette[2] = {
+        gfx_RGBTo1555(15, 15, 25),   // 0: Dark Background
+        gfx_RGBTo1555(255, 255, 255) // 1: Bright White Text
+    };
+    gfx_SetPalette(ui_palette, sizeof(ui_palette), 0);
+}
+
 bool open_next_chunk(ChunkedReader *reader) {
     char var_name[9];
     snprintf(var_name, sizeof(var_name), "%s%u", reader->base_name, reader->current_idx);
@@ -53,14 +61,15 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
     return true;
 }
 
-// Memory-safe drawing function with strict screen boundary protection
-static inline void draw_scaled_pixel_safe(uint8_t x, uint8_t y, uint8_t color_idx) {
-    if (x >= 120 || y >= 90) return; // Prevents writing past RAM boundaries
+// Draws pixels into active back-buffer with memory boundary protection
+static inline void draw_scaled_pixel_fast(uint8_t x, uint8_t y, uint8_t color_idx) {
+    if (x >= 120 || y >= 90) return;
     
+    uint8_t *buf = gfx_GetDrawBuffer();
     uint16_t py = OFFSET_Y + (y << 1);
     uint16_t px = OFFSET_X + (x << 1);
     
-    uint8_t *ptr = &gfx_vbuffer[py * 320 + px];
+    uint8_t *ptr = &buf[py * 320 + px];
     ptr[0] = color_idx;
     ptr[1] = color_idx;
     ptr[320] = color_idx;
@@ -68,8 +77,9 @@ static inline void draw_scaled_pixel_safe(uint8_t x, uint8_t y, uint8_t color_id
 }
 
 void show_error(const char *msg1, const char *msg2) {
+    set_ui_palette();
     gfx_FillScreen(0);
-    gfx_SetTextFGColor(255);
+    gfx_SetTextFGColor(1);
     gfx_PrintStringXY(msg1, 20, 100);
     if (msg2) gfx_PrintStringXY(msg2, 20, 120);
     gfx_PrintStringXY("Press CLEAR to return", 20, 160);
@@ -124,7 +134,9 @@ void play_video(uint8_t video_slot) {
 
     if (target_fps == 0) target_fps = 12;
     uint32_t ticks_per_frame = 32768 / target_fps;
-    timer_Enable(1, TIMER_32K, TIMER_0INT, TIMER_UP);
+    
+    // TIMER_NOINT prevents interrupt resets
+    timer_Enable(1, TIMER_32K, TIMER_NOINT, TIMER_UP);
 
     gfx_FillScreen(0);
 
@@ -150,7 +162,7 @@ void play_video(uint8_t video_slot) {
                 for (uint8_t i = 0; i < count; i++) {
                     uint8_t x = pixels_drawn % width;
                     uint8_t y = pixels_drawn / width;
-                    draw_scaled_pixel_safe(x, y, color);
+                    draw_scaled_pixel_fast(x, y, color);
                     pixels_drawn++;
                 }
             }
@@ -163,7 +175,7 @@ void play_video(uint8_t video_slot) {
                 if (!chunk_read(&x, 1, &reader)) break;
                 if (!chunk_read(&y, 1, &reader)) break;
                 if (!chunk_read(&color, 1, &reader)) break;
-                draw_scaled_pixel_safe(x, y, color);
+                draw_scaled_pixel_fast(x, y, color);
             }
         }
 
@@ -214,15 +226,16 @@ int main(void) {
     uint8_t selected_index = 0;
 
     while (1) {
+        set_ui_palette();
         gfx_FillScreen(0);
-        gfx_SetTextFGColor(255);
+        gfx_SetTextFGColor(1);
 
-        gfx_PrintStringXY("TI-84 CE Color Video Player", 60, 20);
-        gfx_PrintStringXY("---------------------------", 60, 32);
+        gfx_PrintStringXY("TI-84 CE Color Video Player", 50, 20);
+        gfx_PrintStringXY("---------------------------", 50, 32);
 
         char str[32];
         snprintf(str, sizeof(str), "< Video %u of %u (Slot V%uDAT) >", selected_index + 1, found_count, slots[selected_index]);
-        gfx_PrintStringXY(str, 50, 100);
+        gfx_PrintStringXY(str, 40, 100);
 
         gfx_PrintStringXY("Controls:", 40, 150);
         gfx_PrintStringXY("[LEFT / RIGHT] : Switch Video", 40, 170);
