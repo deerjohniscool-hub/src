@@ -4,7 +4,6 @@
 #include <keypadc.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -16,11 +15,27 @@
 #define FRAMES_PER_CHUNK 3
 #define MAX_VIDEOS 10
 
-// Static variables allocated outside eZ80 stack to prevent RAM resets
-static char var_name[16];
+// Static global allocations to prevent eZ80 stack overflow
+static char var_name[9];
 static uint16_t gray_palette[16];
 static uint8_t slots[MAX_VIDEOS];
-static char str_buf[64];
+
+// Fast, zero-stack string builder replacing heavy snprintf/stdio calls
+static void build_var_name(uint8_t slot, uint8_t chunk) {
+    var_name[0] = 'V';
+    var_name[1] = '0' + (slot % 10);
+    var_name[2] = 'D';
+    var_name[3] = 'A';
+    var_name[4] = 'T';
+    if (chunk < 10) {
+        var_name[5] = '0' + chunk;
+        var_name[6] = '\0';
+    } else {
+        var_name[5] = '0' + (chunk / 10);
+        var_name[6] = '0' + (chunk % 10);
+        var_name[7] = '\0';
+    }
+}
 
 static void init_grayscale_palette(void) {
     for (uint8_t i = 0; i < 16; i++) {
@@ -37,7 +52,6 @@ static void show_error(const char *msg1, const char *msg2) {
     gfx_PrintStringXY(msg1, 20, 100);
     if (msg2) gfx_PrintStringXY(msg2, 20, 120);
     gfx_PrintStringXY("Press CLEAR to return", 20, 160);
-    gfx_BlitBuffer();
 
     while (1) {
         kb_Scan();
@@ -49,7 +63,6 @@ static void show_error(const char *msg1, const char *msg2) {
     }
 }
 
-// Fast lightweight delay loop for zero frame lag
 static inline bool check_exit_key(void) {
     kb_Scan();
     return (kb_Data[6] & kb_Clear) != 0;
@@ -65,7 +78,7 @@ static void play_video(uint8_t video_slot) {
     uint8_t frame_in_chunk = 0;
 
     ti_CloseAll();
-    snprintf(var_name, sizeof(var_name), "V%uDAT0", video_slot);
+    build_var_name(video_slot, 0);
 
     file = ti_Open(var_name, "r");
     if (!file) {
@@ -98,7 +111,7 @@ static void play_video(uint8_t video_slot) {
         return;
     }
 
-    // Skip palette data in header, enforce optimal 16-shade linear grayscale
+    // Skip palette header bytes; enforce 16-shade hardware palette
     ptr += num_colors * sizeof(uint16_t);
 
     memcpy(&total_frames, ptr, 4);
@@ -113,7 +126,7 @@ static void play_video(uint8_t video_slot) {
             current_chunk++;
             frame_in_chunk = 0;
 
-            snprintf(var_name, sizeof(var_name), "V%uDAT%u", video_slot, current_chunk);
+            build_var_name(video_slot, current_chunk);
             file = ti_Open(var_name, "r");
             if (!file) break;
 
@@ -125,7 +138,7 @@ static void play_video(uint8_t video_slot) {
         ptr += FRAME_PACKED_SIZE;
         frame_in_chunk++;
 
-        // Fast 2x scaled block copy to LCD VRAM
+        // Render directly to LCD VRAM (gfx_vbuffer = 0xD00000)
         for (uint8_t y = 0; y < FRAME_HEIGHT; y++) {
             uint8_t *line_ptr = &gfx_vbuffer[(OFFSET_Y + (y << 1)) * 320 + OFFSET_X];
 
@@ -144,8 +157,6 @@ static void play_video(uint8_t video_slot) {
             }
         }
 
-        gfx_BlitBuffer();
-
         if (check_exit_key()) break;
     }
 
@@ -158,11 +169,13 @@ int main(void) {
 
     ti_CloseAll();
     gfx_Begin();
-    gfx_SetDrawBuffer();
+    
+    // Direct VRAM rendering mode (uses 0 bytes of RAM heap)
+    gfx_SetDrawScreen();
 
     for (uint8_t i = 0; i < MAX_VIDEOS; i++) {
         ti_var_t f;
-        snprintf(var_name, sizeof(var_name), "V%uDAT0", i);
+        build_var_name(i, 0);
         f = ti_Open(var_name, "r");
         if (f) {
             ti_Close(f);
@@ -185,15 +198,11 @@ int main(void) {
         gfx_PrintStringXY("TI-84 CE Grayscale Video Player", 35, 20);
         gfx_PrintStringXY("-------------------------------", 35, 32);
 
-        snprintf(str_buf, sizeof(str_buf), "< Video %u of %u (Slot V%uDAT) >", selected_index + 1, found_count, slots[selected_index]);
-        gfx_PrintStringXY(str_buf, 40, 100);
-
-        gfx_PrintStringXY("Controls:", 40, 150);
-        gfx_PrintStringXY("[LEFT / RIGHT] : Switch Video", 40, 170);
-        gfx_PrintStringXY("[2nd]          : Play Video", 40, 185);
-        gfx_PrintStringXY("[CLEAR]        : Exit App / Stop", 40, 200);
-
-        gfx_BlitBuffer();
+        gfx_PrintStringXY("Video Ready to Play", 40, 100);
+        gfx_PrintStringXY("Controls:", 40, 140);
+        gfx_PrintStringXY("[LEFT / RIGHT] : Switch Slot", 40, 160);
+        gfx_PrintStringXY("[2nd]          : Play Video", 40, 175);
+        gfx_PrintStringXY("[CLEAR]        : Exit App", 40, 190);
 
         kb_Scan();
         if (kb_Data[7] & kb_Left) {
