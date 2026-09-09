@@ -25,12 +25,15 @@ typedef struct {
 static uint8_t frame_mem[120 * 90];
 
 void setup_grayscale_palette(void) {
-    uint16_t palette[16];
+    uint16_t palette[256];
+    // Color indices 0 through 15 map to 16 levels of smooth grayscale
     for (int i = 0; i < 16; i++) {
         uint8_t level = (i * 255) / 15;
         palette[i] = gfx_RGBTo1555(level, level, level);
     }
-    gfx_SetPalette(palette, 32, 0);
+    // Set index 255 to white for menu backgrounds
+    palette[255] = gfx_RGBTo1555(255, 255, 255);
+    gfx_SetPalette(palette, 512, 0);
 }
 
 bool open_next_chunk(ChunkedReader *reader) {
@@ -106,7 +109,7 @@ void play_video(uint8_t video_slot) {
     if (!chunk_read(&total_frames, sizeof(uint32_t), &reader)) goto cleanup;
 
     setup_grayscale_palette();
-    gfx_FillScreen(0);
+    gfx_FillScreen(255);
 
     for (uint32_t f = 0; f < total_frames; f++) {
         if (os_GetCSC() == sk_Clear) break;
@@ -163,6 +166,7 @@ cleanup:
 int main(void) {
     gfx_Begin();
     gfx_SetDrawBuffer();
+    setup_grayscale_palette();
 
     uint8_t found_count = 0;
     uint8_t slots[MAX_VIDEOS];
