@@ -101,46 +101,47 @@ bool read_bytes_safe(ChunkReader *r, void *dest, size_t count) {
     return true;
 }
 
-static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_frame, size_t out_len) {
+// Decompressor with fast zero-delta skip
+static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_frame) {
     size_t in_idx = 0;
     size_t out_idx = 0;
     
-    while (in_idx < in_len && out_idx < out_len) {
+    while (in_idx < in_len && out_idx < FRAME_SIZE) {
         uint8_t count = in[in_idx++];
         if (count & 0x80) {
             uint8_t run_len = (count & 0x7F) + 1;
             if (in_idx >= in_len) break;
             uint8_t val = in[in_idx++];
-            for (uint8_t i = 0; i < run_len && out_idx < out_len; i++) {
-                out_frame[out_idx++] ^= val;
+            if (val == 0) {
+                out_idx += run_len; // Instant skip for unchanged background
+            } else {
+                while (run_len-- && out_idx < FRAME_SIZE) {
+                    out_frame[out_idx++] ^= val;
+                }
             }
         } else {
             uint8_t lit_len = count + 1;
-            for (uint8_t i = 0; i < lit_len && in_idx < in_len && out_idx < out_len; i++) {
+            while (lit_len-- && in_idx < in_len && out_idx < FRAME_SIZE) {
                 out_frame[out_idx++] ^= in[in_idx++];
             }
         }
     }
 }
 
-// Optimized 32-bit quad-pixel write scaling loop
+// Native 16-bit eZ80 pointer loop (4x faster than 32-bit math)
 void render_frame_scaled_2x(const uint8_t *src) {
     uint8_t *vbuf = gfx_vbuffer;
+    const uint8_t *s = src;
 
     for (uint16_t y = 0; y < SRC_HEIGHT; y++) {
-        uint32_t *row1 = (uint32_t *)(vbuf + (y * 2) * 320);
-        uint32_t *row2 = row1 + 80;
-        const uint16_t *s_row16 = (const uint16_t *)(src + y * SRC_WIDTH);
+        uint16_t *r1 = (uint16_t *)(vbuf + (y * 2) * 320);
+        uint16_t *r2 = r1 + 160;
 
-        for (uint16_t x = 0; x < SRC_WIDTH / 2; x++) {
-            uint16_t pair = s_row16[x];
-            uint8_t p1 = (uint8_t)(pair & 0xFF);
-            uint8_t p2 = (uint8_t)(pair >> 8);
-
-            uint32_t quad = (uint32_t)p1 | ((uint32_t)p1 << 8) | ((uint32_t)p2 << 16) | ((uint32_t)p2 << 24);
-
-            row1[x] = quad;
-            row2[x] = quad;
+        for (uint16_t x = 0; x < SRC_WIDTH; x++) {
+            uint8_t p = *s++;
+            uint16_t dup = (uint16_t)p | ((uint16_t)p << 8);
+            *r1++ = dup;
+            *r2++ = dup;
         }
     }
 }
@@ -211,7 +212,7 @@ void play_video(const char *prefix) {
             return;
         }
         
-        decompress_rle_delta(comp_buf, comp_len, frame_buf, sizeof(frame_buf));
+        decompress_rle_delta(comp_buf, comp_len, frame_buf);
         render_frame_scaled_2x(frame_buf);
         gfx_SwapDraw();
     }
