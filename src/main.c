@@ -145,7 +145,7 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
-// Ultra-fast 4x unrolled 2x pixel scaler for 24-30 FPS playback
+// Optimized unrolled scaler for fast real-time playback
 void render_frame_scaled_2x(const uint8_t *src) {
     uint16_t *r1 = (uint16_t *)gfx_vbuffer;
     uint16_t *r2 = r1 + 160;
@@ -181,7 +181,7 @@ void play_video(const char *prefix) {
     memset(&reader, 0, sizeof(reader));
     strncpy(reader.prefix, prefix, 5);
     
-    log_msg("Starting high-FPS playback: %s", reader.prefix);
+    log_msg("Starting playback: %s", reader.prefix);
     
     if (!open_chunk_ptr(&reader, 0)) {
         display_error("Could not find AppVar chunk 0");
@@ -189,20 +189,20 @@ void play_video(const char *prefix) {
     }
     
     char magic[6];
-    uint16_t width = 0, height = 0, target_fps = 0;
+    uint16_t width = 0, height = 0, fps = 0;
     uint32_t total_frames = 0;
     
     if (!read_bytes_safe(&reader, magic, 6) ||
         !read_bytes_safe(&reader, &width, 2) ||
         !read_bytes_safe(&reader, &height, 2) ||
-        !read_bytes_safe(&reader, &target_fps, 2) ||
+        !read_bytes_safe(&reader, &fps, 2) ||
         !read_bytes_safe(&reader, &total_frames, 4)) {
         display_error("Failed to read stream header");
         return;
     }
     
     if (memcmp(magic, "CEVID2", 6) != 0) {
-        display_error("Magic header mismatch (Requires CEVID2)");
+        display_error("Magic header mismatch");
         return;
     }
     
