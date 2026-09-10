@@ -145,7 +145,7 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
-// Optimized row scaler using table lookups
+// Hardware-accelerated row scaling to draw buffer
 void render_frame_scaled_2x(const uint8_t *src) {
     uint16_t *r1 = (uint16_t *)gfx_vbuffer;
     uint16_t *r2 = r1 + 160;
