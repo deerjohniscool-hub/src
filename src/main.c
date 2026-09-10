@@ -123,25 +123,28 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
-// Fast 16-bit double-pixel scaling loop
+// Optimized 32-bit quad-pixel write scaling loop
 void render_frame_scaled_2x(const uint8_t *src) {
     uint8_t *vbuf = gfx_vbuffer;
 
     for (uint16_t y = 0; y < SRC_HEIGHT; y++) {
-        uint16_t *row1 = (uint16_t *)(vbuf + (y * 2) * 320);
-        uint16_t *row2 = row1 + 160;
-        const uint8_t *s_row = src + y * SRC_WIDTH;
+        uint32_t *row1 = (uint32_t *)(vbuf + (y * 2) * 320);
+        uint32_t *row2 = row1 + 80;
+        const uint16_t *s_row16 = (const uint16_t *)(src + y * SRC_WIDTH);
 
-        for (uint16_t x = 0; x < SRC_WIDTH; x++) {
-            uint8_t pixel = s_row[x];
-            uint16_t dup = (uint16_t)pixel | ((uint16_t)pixel << 8);
-            row1[x] = dup;
-            row2[x] = dup;
+        for (uint16_t x = 0; x < SRC_WIDTH / 2; x++) {
+            uint16_t pair = s_row16[x];
+            uint8_t p1 = (uint8_t)(pair & 0xFF);
+            uint8_t p2 = (uint8_t)(pair >> 8);
+
+            uint32_t quad = (uint32_t)p1 | ((uint32_t)p1 << 8) | ((uint32_t)p2 << 16) | ((uint32_t)p2 << 24);
+
+            row1[x] = quad;
+            row2[x] = quad;
         }
     }
 }
 
-// Fixed grayscale palette mapping via GraphX helper
 void setup_grayscale_palette(void) {
     for (int i = 0; i < 256; i++) {
         gfx_palette[i] = gfx_RGBTo1555(i, i, i);
