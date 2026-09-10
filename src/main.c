@@ -14,8 +14,9 @@
 #define SRC_HEIGHT   120
 #define FRAME_SIZE   (SRC_WIDTH * SRC_HEIGHT) // 19,200 bytes
 
-// Static BSS total = ~28 KB (safely below 60,690 byte limit)
-static uint8_t comp_buf[8192];
+// Expanded buffer to handle worst-case full-frame delta changes
+// Total BSS memory: ~40.7 KB (Linker limit: 60.6 KB)
+static uint8_t comp_buf[20480];
 static uint8_t frame_buf[FRAME_SIZE];
 static char log_buf[1024];
 static size_t log_pos = 0;
