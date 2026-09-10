@@ -145,17 +145,25 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
-// Optimized 2x scaling into double buffer
+// Ultra-fast 4x unrolled 2x pixel scaler for 24-30 FPS playback
 void render_frame_scaled_2x(const uint8_t *src) {
     uint16_t *r1 = (uint16_t *)gfx_vbuffer;
     uint16_t *r2 = r1 + 160;
     const uint8_t *s = src;
 
     for (uint16_t y = 0; y < SRC_HEIGHT; y++) {
-        for (uint16_t x = 0; x < SRC_WIDTH; x++) {
-            uint16_t dup = dup_table[*s++];
-            *r1++ = dup;
-            *r2++ = dup;
+        for (uint16_t x = 0; x < SRC_WIDTH; x += 4) {
+            uint16_t d0 = dup_table[s[0]];
+            uint16_t d1 = dup_table[s[1]];
+            uint16_t d2 = dup_table[s[2]];
+            uint16_t d3 = dup_table[s[3]];
+            s += 4;
+
+            r1[0] = d0; r1[1] = d1; r1[2] = d2; r1[3] = d3;
+            r2[0] = d0; r2[1] = d1; r2[2] = d2; r2[3] = d3;
+
+            r1 += 4;
+            r2 += 4;
         }
         r1 += 160;
         r2 += 160;
@@ -173,7 +181,7 @@ void play_video(const char *prefix) {
     memset(&reader, 0, sizeof(reader));
     strncpy(reader.prefix, prefix, 5);
     
-    log_msg("Starting playback: %s", reader.prefix);
+    log_msg("Starting high-FPS playback: %s", reader.prefix);
     
     if (!open_chunk_ptr(&reader, 0)) {
         display_error("Could not find AppVar chunk 0");
@@ -181,19 +189,20 @@ void play_video(const char *prefix) {
     }
     
     char magic[6];
-    uint16_t width = 0, height = 0;
+    uint16_t width = 0, height = 0, target_fps = 0;
     uint32_t total_frames = 0;
     
     if (!read_bytes_safe(&reader, magic, 6) ||
         !read_bytes_safe(&reader, &width, 2) ||
         !read_bytes_safe(&reader, &height, 2) ||
+        !read_bytes_safe(&reader, &target_fps, 2) ||
         !read_bytes_safe(&reader, &total_frames, 4)) {
         display_error("Failed to read stream header");
         return;
     }
     
-    if (memcmp(magic, "CEVID1", 6) != 0) {
-        display_error("Magic header mismatch");
+    if (memcmp(magic, "CEVID2", 6) != 0) {
+        display_error("Magic header mismatch (Requires CEVID2)");
         return;
     }
     
