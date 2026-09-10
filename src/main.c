@@ -118,7 +118,6 @@ const uint8_t *get_frame_ptr(ChunkReader *r, uint16_t comp_len) {
     return comp_buf;
 }
 
-// Pointer-optimized RLE delta decoder
 static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_frame) {
     const uint8_t *in_end = in + in_len;
     uint8_t *out_ptr = out_frame;
@@ -146,7 +145,7 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
-// Hardware double-buffered 2x scaling (renders to draw buffer)
+// Optimized row scaler using table lookups
 void render_frame_scaled_2x(const uint8_t *src) {
     uint16_t *r1 = (uint16_t *)gfx_vbuffer;
     uint16_t *r2 = r1 + 160;
@@ -204,7 +203,7 @@ void play_video(const char *prefix) {
     }
     
     gfx_Begin();
-    gfx_SetDrawBuffer(); // Use back buffer for hardware page flipping
+    gfx_SetDrawBuffer();
     setup_grayscale_palette();
     
     memset(frame_buf, 0, sizeof(frame_buf));
@@ -227,7 +226,7 @@ void play_video(const char *prefix) {
         
         decompress_rle_delta(frame_data, comp_len, frame_buf);
         render_frame_scaled_2x(frame_buf);
-        gfx_SwapDraw(); // Instant hardware buffer swap (Fixes top-to-bottom warping)
+        gfx_SwapDraw();
     }
     
     gfx_End();
