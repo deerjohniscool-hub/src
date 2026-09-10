@@ -108,7 +108,6 @@ bool read_bytes_safe(ChunkReader *r, void *dest, size_t count) {
     return true;
 }
 
-// Zero-copy pointer getter
 const uint8_t *get_frame_ptr(ChunkReader *r, uint16_t comp_len) {
     if (r->pos + comp_len <= r->size) {
         const uint8_t *ptr = r->data + r->pos;
@@ -145,9 +144,9 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
-// Optimized row pointer scaling loop with table lookup
-void render_frame_scaled_2x(const uint8_t *src) {
-    uint16_t *r1 = (uint16_t *)gfx_vbuffer;
+// Direct write to hardware LCD VRAM (gfx_vram)
+void render_frame_scaled_2x_direct(const uint8_t *src) {
+    uint16_t *r1 = (uint16_t *)gfx_vram;
     uint16_t *r2 = r1 + 160;
     const uint8_t *s = src;
 
@@ -203,7 +202,6 @@ void play_video(const char *prefix) {
     }
     
     gfx_Begin();
-    gfx_SetDrawBuffer();
     setup_grayscale_palette();
     
     memset(frame_buf, 0, sizeof(frame_buf));
@@ -225,8 +223,7 @@ void play_video(const char *prefix) {
         }
         
         decompress_rle_delta(frame_data, comp_len, frame_buf);
-        render_frame_scaled_2x(frame_buf);
-        gfx_SwapDraw();
+        render_frame_scaled_2x_direct(frame_buf);
     }
     
     gfx_End();
