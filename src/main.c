@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 
 #define SCALE_FACTOR 2
 #define FRAME_DELAY_MS 50
@@ -22,18 +23,20 @@ typedef struct {
     size_t buf_len;
 } ChunkedReader;
 
-static uint8_t frame_mem[120 * 90];
+static uint8_t frame_mem[160 * 120];
 
 void setup_grayscale_palette(void) {
     uint16_t palette[256];
-    // Color indices 0 through 15 map to 16 levels of smooth grayscale
+    memset(palette, 0, sizeof(palette));
+    
+    // Set 16 levels of smooth grayscale for indices 0 to 15
     for (int i = 0; i < 16; i++) {
         uint8_t level = (i * 255) / 15;
         palette[i] = gfx_RGBTo1555(level, level, level);
     }
-    // Set index 255 to white for menu backgrounds
+    // Set index 255 to white for UI elements and text
     palette[255] = gfx_RGBTo1555(255, 255, 255);
-    gfx_SetPalette(palette, 512, 0);
+    gfx_SetPalette(palette, sizeof(palette), 0);
 }
 
 bool open_next_chunk(ChunkedReader *reader) {
@@ -74,7 +77,8 @@ bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
 }
 
 void render_frame_scaled(const uint8_t *src, uint16_t w, uint16_t h) {
-    uint8_t *vbuf = gfx_vbuffer;
+    // Write to offscreen buffer rather than visible VRAM to prevent black frame overwrite
+    uint8_t *vbuf = gfx_GetDraw();
     uint16_t x_off = (320 - w * SCALE_FACTOR) / 2;
     uint16_t y_off = (240 - h * SCALE_FACTOR) / 2;
 
@@ -93,6 +97,17 @@ void render_frame_scaled(const uint8_t *src, uint16_t w, uint16_t h) {
     }
 }
 
+// Polls CLEAR key repeatedly during delay for immediate exit
+bool delay_or_exit(uint16_t ms) {
+    uint16_t elapsed = 0;
+    while (elapsed < ms) {
+        if (os_GetCSC() == sk_Clear) return true;
+        delay(5);
+        elapsed += 5;
+    }
+    return false;
+}
+
 void play_video(uint8_t video_slot) {
     ChunkedReader reader = {0};
     snprintf(reader.base_name, sizeof(reader.base_name), "V%uDAT", video_slot);
@@ -101,6 +116,7 @@ void play_video(uint8_t video_slot) {
 
     char magic[6];
     if (!chunk_read(magic, 6, &reader)) goto cleanup;
+    if (memcmp(magic, "CEVID1", 6) != 0) goto cleanup;
 
     uint16_t width, height;
     uint32_t total_frames;
@@ -108,8 +124,11 @@ void play_video(uint8_t video_slot) {
     if (!chunk_read(&height, sizeof(uint16_t), &reader)) goto cleanup;
     if (!chunk_read(&total_frames, sizeof(uint32_t), &reader)) goto cleanup;
 
+    if (width > 160 || height > 120) goto cleanup;
+
     setup_grayscale_palette();
-    gfx_FillScreen(255);
+    gfx_ZeroScreen();
+    memset(frame_mem, 0, sizeof(frame_mem));
 
     for (uint32_t f = 0; f < total_frames; f++) {
         if (os_GetCSC() == sk_Clear) break;
@@ -154,7 +173,8 @@ void play_video(uint8_t video_slot) {
 
         render_frame_scaled(frame_mem, width, height);
         gfx_BlitBuffer();
-        delay(FRAME_DELAY_MS);
+
+        if (delay_or_exit(FRAME_DELAY_MS)) break;
     }
 
 cleanup:
