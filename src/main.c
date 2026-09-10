@@ -145,7 +145,6 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
-// Optimized unrolled scaler for fast real-time playback
 void render_frame_scaled_2x(const uint8_t *src) {
     uint16_t *r1 = (uint16_t *)gfx_vbuffer;
     uint16_t *r2 = r1 + 160;
@@ -170,9 +169,17 @@ void render_frame_scaled_2x(const uint8_t *src) {
     }
 }
 
-void setup_grayscale_palette(void) {
+void setup_color_palette(void) {
     for (int i = 0; i < 256; i++) {
-        gfx_palette[i] = gfx_RGBTo1555(i, i, i);
+        uint8_t r3 = (i >> 5) & 0x07;
+        uint8_t g3 = (i >> 2) & 0x07;
+        uint8_t b2 = i & 0x03;
+        
+        uint8_t r8 = (r3 * 255) / 7;
+        uint8_t g8 = (g3 * 255) / 7;
+        uint8_t b8 = (b2 * 255) / 3;
+        
+        gfx_palette[i] = gfx_RGBTo1555(r8, g8, b8);
     }
 }
 
@@ -213,7 +220,7 @@ void play_video(const char *prefix) {
     
     gfx_Begin();
     gfx_SetDrawBuffer();
-    setup_grayscale_palette();
+    setup_color_palette();
     
     memset(frame_buf, 0, sizeof(frame_buf));
     
