@@ -16,6 +16,7 @@
 
 static uint8_t comp_buf[20480];
 static uint8_t frame_buf[FRAME_SIZE];
+static uint16_t dup_table[256];
 static char log_buf[1024];
 static size_t log_pos = 0;
 
@@ -27,6 +28,12 @@ typedef struct {
     size_t pos;
     char prefix[6];
 } ChunkReader;
+
+void init_dup_table(void) {
+    for (int i = 0; i < 256; i++) {
+        dup_table[i] = (uint16_t)i | ((uint16_t)i << 8);
+    }
+}
 
 void log_msg(const char *fmt, ...) {
     va_list args;
@@ -101,7 +108,17 @@ bool read_bytes_safe(ChunkReader *r, void *dest, size_t count) {
     return true;
 }
 
-// Decompressor with fast zero-delta skip
+// Zero-copy pointer getter
+const uint8_t *get_frame_ptr(ChunkReader *r, uint16_t comp_len) {
+    if (r->pos + comp_len <= r->size) {
+        const uint8_t *ptr = r->data + r->pos;
+        r->pos += comp_len;
+        return ptr;
+    }
+    if (!read_bytes_safe(r, comp_buf, comp_len)) return NULL;
+    return comp_buf;
+}
+
 static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_frame) {
     size_t in_idx = 0;
     size_t out_idx = 0;
@@ -113,7 +130,7 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
             if (in_idx >= in_len) break;
             uint8_t val = in[in_idx++];
             if (val == 0) {
-                out_idx += run_len; // Instant skip for unchanged background
+                out_idx += run_len;
             } else {
                 while (run_len-- && out_idx < FRAME_SIZE) {
                     out_frame[out_idx++] ^= val;
@@ -128,21 +145,20 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
-// Native 16-bit eZ80 pointer loop (4x faster than 32-bit math)
+// Optimized row pointer scaling loop with table lookup
 void render_frame_scaled_2x(const uint8_t *src) {
-    uint8_t *vbuf = gfx_vbuffer;
+    uint16_t *r1 = (uint16_t *)gfx_vbuffer;
+    uint16_t *r2 = r1 + 160;
     const uint8_t *s = src;
 
     for (uint16_t y = 0; y < SRC_HEIGHT; y++) {
-        uint16_t *r1 = (uint16_t *)(vbuf + (y * 2) * 320);
-        uint16_t *r2 = r1 + 160;
-
         for (uint16_t x = 0; x < SRC_WIDTH; x++) {
-            uint8_t p = *s++;
-            uint16_t dup = (uint16_t)p | ((uint16_t)p << 8);
+            uint16_t dup = dup_table[*s++];
             *r1++ = dup;
             *r2++ = dup;
         }
+        r1 += 160;
+        r2 += 160;
     }
 }
 
@@ -202,17 +218,13 @@ void play_video(const char *prefix) {
             return;
         }
         
-        if (comp_len > sizeof(comp_buf)) {
-            display_error("Frame exceeds buffer limit");
-            return;
-        }
-        
-        if (!read_bytes_safe(&reader, comp_buf, comp_len)) {
+        const uint8_t *frame_data = get_frame_ptr(&reader, comp_len);
+        if (!frame_data) {
             display_error("EOF reading frame data");
             return;
         }
         
-        decompress_rle_delta(comp_buf, comp_len, frame_buf);
+        decompress_rle_delta(frame_data, comp_len, frame_buf);
         render_frame_scaled_2x(frame_buf);
         gfx_SwapDraw();
     }
@@ -223,6 +235,7 @@ void play_video(const char *prefix) {
 
 int main(void) {
     os_ClrHome();
+    init_dup_table();
     play_video("V0DAT");
     return 0;
 }
