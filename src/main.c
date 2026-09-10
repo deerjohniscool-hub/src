@@ -12,10 +12,8 @@
 
 #define SRC_WIDTH    160
 #define SRC_HEIGHT   120
-#define FRAME_SIZE   (SRC_WIDTH * SRC_HEIGHT) // 19,200 bytes
+#define FRAME_SIZE   (SRC_WIDTH * SRC_HEIGHT)
 
-// Expanded buffer to handle worst-case full-frame delta changes
-// Total BSS memory: ~40.7 KB (Linker limit: 60.6 KB)
 static uint8_t comp_buf[20480];
 static uint8_t frame_buf[FRAME_SIZE];
 static char log_buf[1024];
@@ -125,30 +123,28 @@ static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_
     }
 }
 
+// Fast 16-bit double-pixel scaling loop
 void render_frame_scaled_2x(const uint8_t *src) {
     uint8_t *vbuf = gfx_vbuffer;
 
     for (uint16_t y = 0; y < SRC_HEIGHT; y++) {
-        uint8_t *row1 = vbuf + (y * 2) * 320;
-        uint8_t *row2 = row1 + 320;
+        uint16_t *row1 = (uint16_t *)(vbuf + (y * 2) * 320);
+        uint16_t *row2 = row1 + 160;
         const uint8_t *s_row = src + y * SRC_WIDTH;
 
         for (uint16_t x = 0; x < SRC_WIDTH; x++) {
             uint8_t pixel = s_row[x];
-            row1[0] = pixel; row1[1] = pixel;
-            row2[0] = pixel; row2[1] = pixel;
-            row1 += 2;
-            row2 += 2;
+            uint16_t dup = (uint16_t)pixel | ((uint16_t)pixel << 8);
+            row1[x] = dup;
+            row2[x] = dup;
         }
     }
 }
 
+// Fixed grayscale palette mapping via GraphX helper
 void setup_grayscale_palette(void) {
     for (int i = 0; i < 256; i++) {
-        uint8_t r = i >> 3;
-        uint8_t g = i >> 2;
-        uint8_t b = i >> 3;
-        gfx_palette[i] = (1 << 15) | (r << 10) | (g << 5) | b;
+        gfx_palette[i] = gfx_RGBTo1555(i, i, i);
     }
 }
 
