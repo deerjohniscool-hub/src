@@ -8,29 +8,70 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdarg.h>
 
 #define SCALE_FACTOR 2
 #define FRAME_DELAY_MS 50
 #define MAX_VIDEOS 10
-#define BUF_SIZE 512
+#define MAX_PIXELS (160 * 120)
 
 typedef struct {
     ti_var_t file;
-    uint8_t current_idx;
+    uint8_t *data;
+    size_t size;
+    size_t pos;
+    uint8_t current_chunk;
     char base_name[7];
-    uint8_t buffer[BUF_SIZE];
-    size_t buf_pos;
-    size_t buf_len;
-} ChunkedReader;
+} ChunkPointerReader;
 
-// Allocated in static BSS memory to prevent stack overflow
-static uint8_t frame_mem[160 * 120];
+static uint8_t frame_mem[MAX_PIXELS];
 static uint16_t global_palette[256];
-static ChunkedReader reader;
+static ChunkPointerReader reader;
+static char log_buffer[2048];
+static size_t log_len = 0;
+
+void log_init(void) {
+    log_len = 0;
+    memset(log_buffer, 0, sizeof(log_buffer));
+}
+
+void log_msg(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    if (log_len < sizeof(log_buffer) - 128) {
+        log_len += vsnprintf(log_buffer + log_len, sizeof(log_buffer) - log_len, fmt, args);
+        log_buffer[log_len++] = '\n';
+    }
+    va_end(args);
+}
+
+void save_log_appvar(void) {
+    ti_var_t log_file = ti_Open("VIDLOG", "w");
+    if (log_file) {
+        ti_Write(log_buffer, 1, log_len, log_file);
+        ti_Close(log_file);
+    }
+}
+
+void display_error(const char *reason) {
+    log_msg("CRITICAL ERROR: %s", reason);
+    save_log_appvar();
+
+    gfx_ZeroScreen();
+    gfx_SetTextFGColor(255);
+    gfx_PrintStringXY("PLAYER ERROR DETECTED", 20, 20);
+    gfx_PrintStringXY("---------------------", 20, 32);
+    gfx_PrintStringXY("Reason:", 20, 50);
+    gfx_PrintStringXY(reason, 20, 65);
+    gfx_PrintStringXY("Log saved to AppVar: VIDLOG", 20, 160);
+    gfx_PrintStringXY("Press [CLEAR] to return", 20, 190);
+    gfx_BlitBuffer();
+
+    while (os_GetCSC() != sk_Clear);
+}
 
 void setup_grayscale_palette(void) {
     memset(global_palette, 0, sizeof(global_palette));
-    
     for (int i = 0; i < 16; i++) {
         uint8_t level = (i * 255) / 15;
         global_palette[i] = gfx_RGBTo1555(level, level, level);
@@ -39,39 +80,42 @@ void setup_grayscale_palette(void) {
     gfx_SetPalette(global_palette, sizeof(global_palette), 0);
 }
 
-bool open_next_chunk(ChunkedReader *r) {
-    char var_name[9];
-    snprintf(var_name, sizeof(var_name), "%s%u", r->base_name, r->current_idx);
-    r->file = ti_Open(var_name, "r");
-    r->buf_pos = 0;
-    r->buf_len = 0;
-    return r->file != 0;
-}
-
-bool read_byte(ChunkedReader *r, uint8_t *out) {
-    if (r->buf_pos >= r->buf_len) {
-        if (!r->file) {
-            if (!open_next_chunk(r)) return false;
-        }
-        r->buf_len = ti_Read(r->buffer, 1, BUF_SIZE, r->file);
-        r->buf_pos = 0;
-        if (r->buf_len == 0) {
-            ti_Close(r->file);
-            r->file = 0;
-            r->current_idx++;
-            if (!open_next_chunk(r)) return false;
-            r->buf_len = ti_Read(r->buffer, 1, BUF_SIZE, r->file);
-            if (r->buf_len == 0) return false;
-        }
+bool open_chunk_ptr(ChunkPointerReader *r, uint8_t chunk_idx) {
+    if (r->file) {
+        ti_Close(r->file);
+        r->file = 0;
     }
-    *out = r->buffer[r->buf_pos++];
-    return true;
+    char var_name[9];
+    snprintf(var_name, sizeof(var_name), "%s%u", r->base_name, chunk_idx);
+    r->file = ti_Open(var_name, "r");
+    if (!r->file) return false;
+    
+    r->data = (uint8_t *)ti_GetDataPtr(r->file);
+    r->size = ti_GetSize(r->file);
+    r->pos = 0;
+    r->current_chunk = chunk_idx;
+    log_msg("Opened chunk %s (Size: %u bytes)", var_name, r->size);
+    return (r->data != NULL && r->size > 0);
 }
 
-bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *r) {
-    uint8_t *out = (uint8_t *)buffer;
-    for (size_t i = 0; i < bytes_to_read; i++) {
-        if (!read_byte(r, &out[i])) return false;
+bool read_bytes_safe(ChunkPointerReader *r, void *dest, size_t bytes_to_read) {
+    uint8_t *out = (uint8_t *)dest;
+    size_t bytes_read = 0;
+
+    while (bytes_read < bytes_to_read) {
+        if (!r->data || r->pos >= r->size) {
+            if (!open_chunk_ptr(r, r->current_chunk + 1)) {
+                return false;
+            }
+        }
+        
+        size_t available = r->size - r->pos;
+        size_t needed = bytes_to_read - bytes_read;
+        size_t take = (needed < available) ? needed : available;
+        
+        memcpy(out + bytes_read, r->data + r->pos, take);
+        r->pos += take;
+        bytes_read += take;
     }
     return true;
 }
@@ -107,22 +151,46 @@ bool delay_or_exit(uint16_t ms) {
 }
 
 void play_video(uint8_t video_slot) {
-    memset(&reader, 0, sizeof(ChunkedReader));
+    log_init();
+    log_msg("Starting playback slot V%uDAT", video_slot);
+
+    memset(&reader, 0, sizeof(ChunkPointerReader));
     snprintf(reader.base_name, sizeof(reader.base_name), "V%uDAT", video_slot);
 
-    if (!open_next_chunk(&reader)) return;
+    if (!open_chunk_ptr(&reader, 0)) {
+        display_error("Could not open initial chunk 0");
+        return;
+    }
 
     char magic[6];
-    if (!chunk_read(magic, 6, &reader)) goto cleanup;
-    if (memcmp(magic, "CEVID1", 6) != 0) goto cleanup;
+    if (!read_bytes_safe(&reader, magic, 6)) {
+        display_error("Failed to read header magic");
+        return;
+    }
+    
+    if (memcmp(magic, "CEVID1", 6) != 0) {
+        char err_buf[64];
+        snprintf(err_buf, sizeof(err_buf), "Header mismatch: '%.6s'", magic);
+        display_error(err_buf);
+        return;
+    }
 
-    uint16_t width, height;
-    uint32_t total_frames;
-    if (!chunk_read(&width, sizeof(uint16_t), &reader)) goto cleanup;
-    if (!chunk_read(&height, sizeof(uint16_t), &reader)) goto cleanup;
-    if (!chunk_read(&total_frames, sizeof(uint32_t), &reader)) goto cleanup;
+    uint16_t width = 0, height = 0;
+    uint32_t total_frames = 0;
 
-    if (width > 160 || height > 120) goto cleanup;
+    if (!read_bytes_safe(&reader, &width, 2) ||
+        !read_bytes_safe(&reader, &height, 2) ||
+        !read_bytes_safe(&reader, &total_frames, 4)) {
+        display_error("Failed reading video metadata");
+        return;
+    }
+
+    log_msg("Metadata: %ux%u, Frames: %u", width, height, total_frames);
+
+    if (width > 160 || height > 120) {
+        display_error("Resolution exceeds 160x120 limit");
+        return;
+    }
 
     setup_grayscale_palette();
     gfx_ZeroScreen();
@@ -132,39 +200,63 @@ void play_video(uint8_t video_slot) {
         if (os_GetCSC() == sk_Clear) break;
 
         uint8_t frame_type;
-        if (!chunk_read(&frame_type, 1, &reader)) break;
+        if (!read_bytes_safe(&reader, &frame_type, 1)) {
+            display_error("Unexpected EOF reading frame type");
+            return;
+        }
 
         if (frame_type == 0) { 
-            uint32_t rle_len;
-            if (!chunk_read(&rle_len, sizeof(uint32_t), &reader)) break;
+            uint32_t rle_len = 0;
+            if (!read_bytes_safe(&reader, &rle_len, 4)) {
+                display_error("Failed reading RLE len");
+                return;
+            }
 
             uint32_t pixels_drawn = 0;
             uint32_t bytes_read = 0;
 
             while (bytes_read < rle_len) {
-                uint8_t count, color;
-                if (!chunk_read(&count, 1, &reader)) break;
-                if (!chunk_read(&color, 1, &reader)) break;
+                uint8_t count = 0, color = 0;
+                if (!read_bytes_safe(&reader, &count, 1) ||
+                    !read_bytes_safe(&reader, &color, 1)) {
+                    display_error("EOF during RLE stream");
+                    return;
+                }
                 bytes_read += 2;
 
                 for (uint8_t i = 0; i < count; i++) {
-                    if (pixels_drawn < (uint32_t)(width * height)) {
+                    if (pixels_drawn < MAX_PIXELS) {
                         frame_mem[pixels_drawn++] = color;
+                    } else {
+                        display_error("RLE overflowed 160x120 buffer");
+                        return;
                     }
                 }
             }
         } else if (frame_type == 1) { 
-            uint16_t num_changes;
-            if (!chunk_read(&num_changes, sizeof(uint16_t), &reader)) break;
+            uint16_t num_changes = 0;
+            if (!read_bytes_safe(&reader, &num_changes, 2)) {
+                display_error("Failed reading delta frame count");
+                return;
+            }
 
             for (uint16_t i = 0; i < num_changes; i++) {
-                uint8_t x, y, color;
-                if (!chunk_read(&x, 1, &reader)) break;
-                if (!chunk_read(&y, 1, &reader)) break;
-                if (!chunk_read(&color, 1, &reader)) break;
+                uint8_t x = 0, y = 0, color = 0;
+                if (!read_bytes_safe(&reader, &x, 1) ||
+                    !read_bytes_safe(&reader, &y, 1) ||
+                    !read_bytes_safe(&reader, &color, 1)) {
+                    display_error("EOF inside delta frame");
+                    return;
+                }
                 
                 if (x < width && y < height) {
-                    frame_mem[y * width + x] = color;
+                    uint32_t idx = (uint32_t)y * width + x;
+                    if (idx < MAX_PIXELS) {
+                        frame_mem[idx] = color;
+                    }
+                } else {
+                    display_error("Delta pixel out of bounds");
+                    return;
                 }
             }
         }
@@ -175,7 +267,6 @@ void play_video(uint8_t video_slot) {
         if (delay_or_exit(FRAME_DELAY_MS)) break;
     }
 
-cleanup:
     if (reader.file) {
         ti_Close(reader.file);
         reader.file = 0;
