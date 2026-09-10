@@ -118,35 +118,37 @@ const uint8_t *get_frame_ptr(ChunkReader *r, uint16_t comp_len) {
     return comp_buf;
 }
 
+// Pointer-optimized RLE delta decoder
 static void decompress_rle_delta(const uint8_t *in, size_t in_len, uint8_t *out_frame) {
-    size_t in_idx = 0;
-    size_t out_idx = 0;
+    const uint8_t *in_end = in + in_len;
+    uint8_t *out_ptr = out_frame;
+    uint8_t *out_end = out_frame + FRAME_SIZE;
     
-    while (in_idx < in_len && out_idx < FRAME_SIZE) {
-        uint8_t count = in[in_idx++];
+    while (in < in_end && out_ptr < out_end) {
+        uint8_t count = *in++;
         if (count & 0x80) {
             uint8_t run_len = (count & 0x7F) + 1;
-            if (in_idx >= in_len) break;
-            uint8_t val = in[in_idx++];
+            if (in >= in_end) break;
+            uint8_t val = *in++;
             if (val == 0) {
-                out_idx += run_len;
+                out_ptr += run_len;
             } else {
-                while (run_len-- && out_idx < FRAME_SIZE) {
-                    out_frame[out_idx++] ^= val;
+                while (run_len-- && out_ptr < out_end) {
+                    *out_ptr++ ^= val;
                 }
             }
         } else {
             uint8_t lit_len = count + 1;
-            while (lit_len-- && in_idx < in_len && out_idx < FRAME_SIZE) {
-                out_frame[out_idx++] ^= in[in_idx++];
+            while (lit_len-- && in < in_end && out_ptr < out_end) {
+                *out_ptr++ ^= *in++;
             }
         }
     }
 }
 
-// Direct write to hardware LCD VRAM (gfx_vram)
-void render_frame_scaled_2x_direct(const uint8_t *src) {
-    uint16_t *r1 = (uint16_t *)gfx_vram;
+// Hardware double-buffered 2x scaling (renders to draw buffer)
+void render_frame_scaled_2x(const uint8_t *src) {
+    uint16_t *r1 = (uint16_t *)gfx_vbuffer;
     uint16_t *r2 = r1 + 160;
     const uint8_t *s = src;
 
@@ -202,6 +204,7 @@ void play_video(const char *prefix) {
     }
     
     gfx_Begin();
+    gfx_SetDrawBuffer(); // Use back buffer for hardware page flipping
     setup_grayscale_palette();
     
     memset(frame_buf, 0, sizeof(frame_buf));
@@ -223,7 +226,8 @@ void play_video(const char *prefix) {
         }
         
         decompress_rle_delta(frame_data, comp_len, frame_buf);
-        render_frame_scaled_2x_direct(frame_buf);
+        render_frame_scaled_2x(frame_buf);
+        gfx_SwapDraw(); // Instant hardware buffer swap (Fixes top-to-bottom warping)
     }
     
     gfx_End();
