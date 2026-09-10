@@ -23,61 +23,60 @@ typedef struct {
     size_t buf_len;
 } ChunkedReader;
 
+// Allocated in static BSS memory to prevent stack overflow
 static uint8_t frame_mem[160 * 120];
+static uint16_t global_palette[256];
+static ChunkedReader reader;
 
 void setup_grayscale_palette(void) {
-    uint16_t palette[256];
-    memset(palette, 0, sizeof(palette));
+    memset(global_palette, 0, sizeof(global_palette));
     
-    // Set 16 levels of smooth grayscale for indices 0 to 15
     for (int i = 0; i < 16; i++) {
         uint8_t level = (i * 255) / 15;
-        palette[i] = gfx_RGBTo1555(level, level, level);
+        global_palette[i] = gfx_RGBTo1555(level, level, level);
     }
-    // Set index 255 to white for UI elements and text
-    palette[255] = gfx_RGBTo1555(255, 255, 255);
-    gfx_SetPalette(palette, sizeof(palette), 0);
+    global_palette[255] = gfx_RGBTo1555(255, 255, 255);
+    gfx_SetPalette(global_palette, sizeof(global_palette), 0);
 }
 
-bool open_next_chunk(ChunkedReader *reader) {
+bool open_next_chunk(ChunkedReader *r) {
     char var_name[9];
-    snprintf(var_name, sizeof(var_name), "%s%u", reader->base_name, reader->current_idx);
-    reader->file = ti_Open(var_name, "r");
-    reader->buf_pos = 0;
-    reader->buf_len = 0;
-    return reader->file != 0;
+    snprintf(var_name, sizeof(var_name), "%s%u", r->base_name, r->current_idx);
+    r->file = ti_Open(var_name, "r");
+    r->buf_pos = 0;
+    r->buf_len = 0;
+    return r->file != 0;
 }
 
-bool read_byte(ChunkedReader *reader, uint8_t *out) {
-    if (reader->buf_pos >= reader->buf_len) {
-        if (!reader->file) {
-            if (!open_next_chunk(reader)) return false;
+bool read_byte(ChunkedReader *r, uint8_t *out) {
+    if (r->buf_pos >= r->buf_len) {
+        if (!r->file) {
+            if (!open_next_chunk(r)) return false;
         }
-        reader->buf_len = ti_Read(reader->buffer, 1, BUF_SIZE, reader->file);
-        reader->buf_pos = 0;
-        if (reader->buf_len == 0) {
-            ti_Close(reader->file);
-            reader->file = 0;
-            reader->current_idx++;
-            if (!open_next_chunk(reader)) return false;
-            reader->buf_len = ti_Read(reader->buffer, 1, BUF_SIZE, reader->file);
-            if (reader->buf_len == 0) return false;
+        r->buf_len = ti_Read(r->buffer, 1, BUF_SIZE, r->file);
+        r->buf_pos = 0;
+        if (r->buf_len == 0) {
+            ti_Close(r->file);
+            r->file = 0;
+            r->current_idx++;
+            if (!open_next_chunk(r)) return false;
+            r->buf_len = ti_Read(r->buffer, 1, BUF_SIZE, r->file);
+            if (r->buf_len == 0) return false;
         }
     }
-    *out = reader->buffer[reader->buf_pos++];
+    *out = r->buffer[r->buf_pos++];
     return true;
 }
 
-bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *reader) {
+bool chunk_read(void *buffer, size_t bytes_to_read, ChunkedReader *r) {
     uint8_t *out = (uint8_t *)buffer;
     for (size_t i = 0; i < bytes_to_read; i++) {
-        if (!read_byte(reader, &out[i])) return false;
+        if (!read_byte(r, &out[i])) return false;
     }
     return true;
 }
 
 void render_frame_scaled(const uint8_t *src, uint16_t w, uint16_t h) {
-    // Write to offscreen buffer rather than visible VRAM to prevent black frame overwrite
     uint8_t *vbuf = gfx_GetDraw();
     uint16_t x_off = (320 - w * SCALE_FACTOR) / 2;
     uint16_t y_off = (240 - h * SCALE_FACTOR) / 2;
@@ -97,7 +96,6 @@ void render_frame_scaled(const uint8_t *src, uint16_t w, uint16_t h) {
     }
 }
 
-// Polls CLEAR key repeatedly during delay for immediate exit
 bool delay_or_exit(uint16_t ms) {
     uint16_t elapsed = 0;
     while (elapsed < ms) {
@@ -109,7 +107,7 @@ bool delay_or_exit(uint16_t ms) {
 }
 
 void play_video(uint8_t video_slot) {
-    ChunkedReader reader = {0};
+    memset(&reader, 0, sizeof(ChunkedReader));
     snprintf(reader.base_name, sizeof(reader.base_name), "V%uDAT", video_slot);
 
     if (!open_next_chunk(&reader)) return;
@@ -180,6 +178,7 @@ void play_video(uint8_t video_slot) {
 cleanup:
     if (reader.file) {
         ti_Close(reader.file);
+        reader.file = 0;
     }
 }
 
